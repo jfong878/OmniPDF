@@ -55,4 +55,18 @@ Set-ItemProperty -Path "$regRoot\$progId\DefaultIcon" -Name '(default)' -Value "
 New-Item -Path "$regRoot\.pdf\OpenWithProgids" -Force | Out-Null
 Set-ItemProperty -Path "$regRoot\.pdf\OpenWithProgids" -Name $progId -Value ([byte[]]@()) -Type Binary
 
+# Application registration: this is what makes OmniPDF selectable as the
+# default PDF handler in Settings > Default apps. Windows protects the
+# UserChoice default with a hash, so no program can set it silently —
+# the registration below only offers the app; the user confirms the choice.
+$capRoot = 'HKCU:\Software\OmniPDF\Capabilities'
+New-Item -Path $capRoot -Force | Out-Null
+Set-ItemProperty -Path $capRoot -Name 'ApplicationName' -Value 'OmniPDF'
+Set-ItemProperty -Path $capRoot -Name 'ApplicationDescription' -Value 'OmniPDF — PDF viewer, editor, signer, OCR'
+New-Item -Path "$capRoot\FileAssociations" -Force | Out-Null
+Set-ItemProperty -Path "$capRoot\FileAssociations" -Name '.pdf' -Value $progId
+New-Item -Path 'HKCU:\Software\RegisteredApplications' -Force | Out-Null
+Set-ItemProperty -Path 'HKCU:\Software\RegisteredApplications' -Name 'OmniPDF' -Value 'Software\OmniPDF\Capabilities'
+Write-Output "  registered: OmniPDF handles .pdf (Settings > Default apps)"
+
 Write-Output "Installed."
