@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self' app:; script-src 'self' app:; style-src 'self' app: 'unsafe-inline'; img-src 'self' app: data: blob:; font-src 'self' app: data:; worker-src 'self' app: blob:; connect-src 'self' app: data: blob:; object-src 'none';"
+    />
+    <title>OmniPDF</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header id="toolbar">
+      <div class="group">
+        <button id="btn-open" class="primary" title="Open a PDF (Ctrl+O)">Open</button>
+        <button id="btn-save" title="Save (Ctrl+S)">Save</button>
+        <button id="btn-saveas" title="Save As (Ctrl+Shift+S)">Save As</button>
+      </div>
+
+      <div class="group">
+        <button id="btn-prev" title="Previous page">&#8249;</button>
+        <input id="page-input" type="number" min="1" value="1" aria-label="Page number" />
+        <span id="page-total">/ 0</span>
+        <button id="btn-next" title="Next page">&#8250;</button>
+      </div>
+
+      <div class="group">
+        <button id="btn-zoom-out" title="Zoom out">&minus;</button>
+        <span id="zoom-label">100%</span>
+        <button id="btn-zoom-in" title="Zoom in">+</button>
+        <button id="btn-fit" title="Fit width">Fit</button>
+      </div>
+
+      <div class="group" id="tool-group">
+        <button class="tool is-active" data-tool="select" title="Select and fill forms">Select</button>
+        <button class="tool" data-tool="highlight" title="Highlight text">Highlight</button>
+        <button class="tool" data-tool="box" title="Draw a box">Box</button>
+        <button class="tool" data-tool="ink" title="Freehand draw">Draw</button>
+        <button class="tool" data-tool="text" title="Add a text note">Text</button>
+        <button class="tool" data-tool="erase" title="Erase an annotation">Erase</button>
+      </div>
+
+      <div class="group">
+        <button id="btn-rotate" title="Rotate this page (Ctrl+R)">Rotate</button>
+        <button id="btn-delete-page" title="Delete this page">Delete page</button>
+        <button id="btn-extract" title="Save selected pages to a new file">Extract</button>
+      </div>
+
+      <div class="group">
+        <button id="btn-ocr" title="Make scanned pages searchable (Ctrl+Shift+O)">OCR</button>
+        <button id="btn-sign" title="Digitally sign this document (Ctrl+Shift+D)">Sign</button>
+      </div>
+
+      <div class="group grow">
+        <input id="search" type="search" placeholder="Search document…" aria-label="Search document" />
+        <span id="search-count"></span>
+      </div>
+    </header>
+
+    <main>
+      <aside id="sidebar"><div id="thumbs"></div></aside>
+      <section id="viewer">
+        <div id="pages"></div>
+        <div id="empty-state">
+          <h1>OmniPDF</h1>
+          <p>Open a PDF, or drop one anywhere in this window.</p>
+          <p class="hint">View · annotate · fill forms · sign · OCR</p>
+        </div>
+      </section>
+    </main>
+
+    <footer id="statusbar">
+      <span id="status-file">No document</span>
+      <span id="status-msg"></span>
+    </footer>
+
+    <dialog id="dlg-sign">
+      <form method="dialog">
+        <h2>Sign document</h2>
+        <p class="muted">
+          The signature is applied with your local self-signed identity. It is tamper-evident, but
+          identity assurance requires the verifier to trust that certificate.
+        </p>
+        <label>Name <input id="sign-name" type="text" value="OmniPDF User" /></label>
+        <label>Reason <input id="sign-reason" type="text" value="Approved" /></label>
+        <label>Location <input id="sign-location" type="text" placeholder="Optional" /></label>
+        <menu>
+          <button value="cancel">Cancel</button>
+          <button value="ok" class="primary" id="sign-confirm">Sign</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-ocr">
+      <form method="dialog">
+        <h2>Optical character recognition</h2>
+        <p class="muted">
+          Rasterises pages and lays an invisible, positioned text layer over them. Best for scanned
+          documents.
+        </p>
+        <label
+          >Scope
+          <select id="ocr-scope">
+            <option value="current">Current page</option>
+            <option value="all" selected>Entire document</option>
+          </select>
+        </label>
+        <label
+          >Language
+          <select id="ocr-lang">
+            <option value="eng" selected>English</option>
+            <option value="deu">German</option>
+            <option value="fra">French</option>
+            <option value="spa">Spanish</option>
+            <option value="ita">Italian</option>
+            <option value="por">Portuguese</option>
+            <option value="nld">Dutch</option>
+            <option value="rus">Russian</option>
+            <option value="chi_sim">Chinese (Simplified)</option>
+            <option value="jpn">Japanese</option>
+          </select>
+        </label>
+        <menu>
+          <button value="cancel">Cancel</button>
+          <button value="ok" class="primary" id="ocr-confirm">Run OCR</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-text">
+      <form method="dialog">
+        <h2>Text note</h2>
+        <textarea id="text-value" rows="4" placeholder="Type the note…"></textarea>
+        <menu>
+          <button value="cancel">Cancel</button>
+          <button value="ok" class="primary">Add</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-cert">
+      <form method="dialog">
+        <h2>Signing identity</h2>
+        <dl id="cert-body"></dl>
+        <menu><button value="ok" class="primary">Close</button></menu>
+      </form>
+    </dialog>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

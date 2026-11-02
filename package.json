@@ -1,0 +1,29 @@
+{
+  "name": "omnipdf",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OmniPDF - local PDF viewer, editor, form signer and OCR",
+  "main": "main.js",
+  "author": "OmniPDF",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "fixture": "node scripts/make-fixture.mjs",
+    "selftest": "node scripts/selftest.mjs",
+    "smoke": "electron . --smoke",
+    "package": "electron-packager . OmniPDF --platform=win32 --arch=x64 --out=dist --overwrite --asar --icon=assets/icon.ico --ignore=\"^/(dist|scripts|\\.tessdata)\""
+  },
+  "dependencies": {
+    "@signpdf/placeholder-pdf-lib": "^4.0.0",
+    "@signpdf/signer-p12": "^4.0.0",
+    "@signpdf/signpdf": "^4.0.0",
+    "node-forge": "^1.4.2",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^6.5.438",
+    "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "electron": "^45.2.1"
+  }
+}
