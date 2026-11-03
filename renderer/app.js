@@ -4,11 +4,14 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/build/pdf.worker.mjs';
 
 const CMAP_URL = '/vendor/cmaps/';
 const STANDARD_FONTS = '/vendor/standard_fonts/';
+const WASM_URL = '/vendor/wasm/';
+const ICC_URL = '/vendor/iccs/';
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 5;
 const DEFAULT_SCALE = 1.15;
 const DPR = Math.min(window.devicePixelRatio || 1, 2);
-const BUILD_TAG = 'build-5';
+const MAX_CANVAS_PIXELS = 8_000_000;
+const BUILD_TAG = 'build-6';
 
 const IDS = [
   'btn-open', 'btn-save', 'btn-saveas', 'btn-prev', 'btn-next', 'page-input', 'page-total',
@@ -36,6 +39,7 @@ let state = null; // active tab, or null when no document is open
 let tool = 'select';
 let tabSeq = 0;
 let allowUnload = false;
+let scaleTimer = null;
 
 const SIGN_PAD_W = 700;
 const SIGN_PAD_H = 200;
@@ -70,6 +74,7 @@ function createTab() {
     searchToken: 0,
     searchTimer: null,
     scale: DEFAULT_SCALE,
+    layoutScale: DEFAULT_SCALE,
     current: 0,
     dirty: false,
     nextId: 1,
@@ -324,6 +329,8 @@ async function openBytes(s, bytes, name, filePath) {
     cMapUrl: CMAP_URL,
     cMapPacked: true,
     standardFontDataUrl: STANDARD_FONTS,
+    wasmUrl: WASM_URL,
+    iccUrl: ICC_URL,
     isEvalSupported: false,
     useSystemFonts: true,
   }).promise;
@@ -417,7 +424,15 @@ async function buildPages(s) {
     overlay.addEventListener('pointerdown', (ev) => onOverlayDown(s, ev, idx));
 
     el.pages.appendChild(div);
-    s.pageEls.set(idx, { div, vp, rendered: '', renderSeq: 0, widgets: [] });
+    s.pageEls.set(idx, {
+      div,
+      vp,
+      baseW: vp.width / s.scale,
+      baseH: vp.height / s.scale,
+      rendered: '',
+      renderSeq: 0,
+      widgets: [],
+    });
     s.io.observe(div);
 
     const thumb = document.createElement('div');
@@ -427,6 +442,8 @@ async function buildPages(s) {
     el.thumbs.appendChild(thumb);
     s.thumbEls.set(idx, thumb);
   }
+
+  s.layoutScale = s.scale;
 
   // Thumbnails render after the first pages so opening feels immediate.
   window.setTimeout(() => {
@@ -490,15 +507,19 @@ async function doRenderPage(s, idx) {
 
   const canvas = entry.div.querySelector('.page-canvas');
   const scaled = page.getViewport({ scale: s.scale * DPR, rotation });
-  canvas.width = Math.max(1, Math.floor(scaled.width));
-  canvas.height = Math.max(1, Math.floor(scaled.height));
+  const pixelBudget = Math.min(1, Math.sqrt(MAX_CANVAS_PIXELS / Math.max(1, scaled.width * scaled.height)));
+  const renderViewport = pixelBudget < 1
+    ? page.getViewport({ scale: s.scale * DPR * pixelBudget, rotation })
+    : scaled;
+  canvas.width = Math.max(1, Math.floor(renderViewport.width));
+  canvas.height = Math.max(1, Math.floor(renderViewport.height));
 
   const ctx = canvas.getContext('2d', { alpha: false });
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   try {
-    await page.render({ canvasContext: ctx, canvas, viewport: scaled }).promise;
+    await page.render({ canvasContext: ctx, canvas, viewport: renderViewport }).promise;
   } catch {
     return;
   }
@@ -713,8 +734,10 @@ async function layoutPage(s, idx) {
   const height = parseFloat(entry.div.style.height) || vp.height;
 
   const overlay = entry.div.querySelector('.anno-layer');
-  overlay.width = Math.max(1, Math.floor(width * DPR));
-  overlay.height = Math.max(1, Math.floor(height * DPR));
+  const overlayScale = Math.min(DPR, Math.sqrt(MAX_CANVAS_PIXELS / Math.max(1, width * height)));
+  entry.overlayScale = overlayScale;
+  overlay.width = Math.max(1, Math.floor(width * overlayScale));
+  overlay.height = Math.max(1, Math.floor(height * overlayScale));
   overlay.style.width = `${width}px`;
   overlay.style.height = `${height}px`;
   overlay.classList.toggle('is-active', tool !== 'select' || s.signMode);
@@ -744,7 +767,8 @@ function paintAnnotations(s, idx) {
   const ctx = canvas.getContext('2d');
   const width = parseFloat(entry.div.style.width) || 0;
   const height = parseFloat(entry.div.style.height) || 0;
-  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const overlayScale = entry.overlayScale || DPR;
+  ctx.setTransform(overlayScale, 0, 0, overlayScale, 0, 0);
   ctx.clearRect(0, 0, width, height);
   const vp = entry.vp;
   if (!vp) return;
@@ -1648,25 +1672,83 @@ function updateCurrentPage(s) {
   }
 }
 
-async function setScale(s, next) {
-  if (!hasDoc(s) || s !== state) return;
-  s.scale = clamp(next, MIN_SCALE, MAX_SCALE);
-  el['zoom-label'].textContent = `${Math.round(s.scale * 100)}%`;
+async function applyScale(s) {
+  if (!hasDoc(s) || s !== state || !s.pageEls.size) return;
+  const oldScale = s.layoutScale || s.scale;
+  const nextScale = s.scale;
+  if (Math.abs(nextScale - oldScale) < 0.0001) return;
+
+  const anchorPos = s.current;
+  const anchorEl = el.pages.children[anchorPos] || null;
+  const anchorOffset = anchorEl ? el.viewer.scrollTop - anchorEl.offsetTop : 0;
+
+  // Resize the existing page boxes instead of rebuilding all 460 pages. The
+  // visible pages are rerendered at the new scale; offscreen pages render when
+  // they next intersect the viewport.
   for (const idx of s.pageOrder) {
     const entry = s.pageEls.get(idx);
     if (!entry) continue;
+    const baseW = entry.baseW || (entry.vp ? entry.vp.width / oldScale : 0);
+    const baseH = entry.baseH || (entry.vp ? entry.vp.height / oldScale : 0);
+    const width = Math.max(1, Math.floor(baseW * nextScale));
+    const height = Math.max(1, Math.floor(baseH * nextScale));
     entry.rendered = '';
-    const vp = await getViewport(s, idx);
-    if (s !== state) return;
-    entry.div.style.width = `${Math.floor(vp.width)}px`;
-    entry.div.style.height = `${Math.floor(vp.height)}px`;
-    entry.vp = vp;
-    await layoutPage(s, idx);
+    entry.vp = null;
+    entry.renderSeq += 1;
+    entry.div.style.width = `${width}px`;
+    entry.div.style.height = `${height}px`;
+    const canvas = entry.div.querySelector('.page-canvas');
+    if (canvas) {
+      canvas.width = 1;
+      canvas.height = 1;
+    }
+    const textLayer = entry.div.querySelector('.text-layer');
+    if (textLayer) textLayer.innerHTML = '';
+    const searchLayer = entry.div.querySelector('.search-layer');
+    if (searchLayer) searchLayer.innerHTML = '';
+  }
+
+  s.layoutScale = nextScale;
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  if (s !== state) return;
+  if (anchorEl) {
+    el.viewer.scrollTop = Math.max(0, anchorEl.offsetTop + anchorOffset * (nextScale / oldScale));
   }
   for (const idx of s.pageOrder) {
     const entry = s.pageEls.get(idx);
     if (entry && isVisible(entry.div)) renderPage(s, idx).catch(() => {});
   }
+  updateCurrentPage(s);
+}
+
+async function setScale(s, next) {
+  if (!hasDoc(s) || s !== state) return;
+  const target = clamp(next, MIN_SCALE, MAX_SCALE);
+  if (Math.abs(target - s.scale) < 0.0001) return;
+  s.scale = target;
+  syncChrome(s);
+  await applyScale(s);
+}
+
+function scheduleScale(s, next) {
+  if (!hasDoc(s) || s !== state) return;
+  const target = clamp(next, MIN_SCALE, MAX_SCALE);
+  if (Math.abs(target - s.scale) < 0.0001) return;
+  s.scale = target;
+  syncChrome(s);
+  window.clearTimeout(scaleTimer);
+  scaleTimer = window.setTimeout(() => {
+    scaleTimer = null;
+    if (s === state) applyScale(s).catch(() => {});
+  }, 50);
+}
+
+function onZoomWheel(ev) {
+  if (!hasDoc(state) || !(ev.ctrlKey || ev.metaKey)) return;
+  const delta = Math.abs(ev.deltaY) >= Math.abs(ev.deltaX) ? ev.deltaY : ev.deltaX;
+  if (!delta) return;
+  ev.preventDefault();
+  scheduleScale(state, state.scale * Math.exp(-delta * 0.0015));
 }
 
 function isVisible(node) {
@@ -1706,6 +1788,8 @@ async function rotateCurrent(s) {
   const vp = await getViewport(s, idx);
   if (s !== state) return;
   if (entry) {
+    entry.baseW = vp.width / s.scale;
+    entry.baseH = vp.height / s.scale;
     entry.div.style.width = `${Math.floor(vp.width)}px`;
     entry.div.style.height = `${Math.floor(vp.height)}px`;
     entry.vp = vp;
@@ -1995,6 +2079,7 @@ function bind() {
     window.clearTimeout(scrollTimer);
     scrollTimer = window.setTimeout(() => updateCurrentPage(state), 90);
   });
+  el.viewer.addEventListener('wheel', onZoomWheel, { passive: false });
 
   document.addEventListener('keydown', (ev) => {
     if (ev.ctrlKey && !ev.altKey && ev.key.toLowerCase() === 's') {

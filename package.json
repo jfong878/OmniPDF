@@ -1,6 +1,6 @@
 {
   "name": "omnipdf",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "private": true,
   "description": "OmniPDF - local PDF viewer, editor, form signer and OCR",
   "main": "main.js",
