@@ -7,6 +7,7 @@ const require = createRequire(import.meta.url);
 const { PDFDocument } = require('pdf-lib');
 const { saveWithEdits, extractPages } = require('../src/core/edit');
 const { ensureSigner, signPdf } = require('../src/core/sign');
+const signatures = require('../src/main/signatures');
 const { ocrPng, setCacheDir } = require('../src/core/ocr');
 
 const root = process.cwd();
@@ -110,6 +111,29 @@ console.log('\n[5] sign');
   check('signed document still loads', doc.getPageCount() === 3, String(doc.getPageCount()));
   const fields = doc.getForm().getFields().map((f) => f.constructor.name);
   check('signature field added', fields.includes('PDFSignature'), fields.join(',') || 'none');
+
+  const signaturePng = fs.readFileSync(path.join(root, 'assets', 'icon-16.png'));
+  const signedWithImage = await signPdf(source, {
+    pageIndex: 0,
+    rect: { x: 330, y: 80, w: 210, h: 64 },
+    name: 'Ada Lovelace',
+    reason: 'Approved',
+    location: 'London',
+    signatureImage: signaturePng,
+    signer,
+  });
+  const imageRaw = signedWithImage.toString('latin1');
+  check('signature image embedded', imageRaw.includes('/Subtype /Image'));
+  const imageDoc = await PDFDocument.load(signedWithImage);
+  check('image-signed document still loads', imageDoc.getPageCount() === 3, String(imageDoc.getPageCount()));
+  const imageFields = imageDoc.getForm().getFields().map((f) => f.constructor.name);
+  check('image signature field added', imageFields.includes('PDFSignature'), imageFields.join(',') || 'none');
+
+  const savedDataUrl = `data:image/png;base64,${signaturePng.toString('base64')}`;
+  const stored = signatures.save(dir, { name: 'Test signature', dataUrl: savedDataUrl });
+  check('saved signature persisted', signatures.list(dir).some((item) => item.id === stored.id));
+  signatures.remove(dir, stored.id);
+  check('saved signature removed', !signatures.list(dir).some((item) => item.id === stored.id));
 }
 
 console.log('\n[6] OCR');

@@ -7,6 +7,28 @@ const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const { sanitizeWinAnsi } = require('./util');
 
 const PASSPHRASE = 'omnipdf-local-identity';
+const MAX_SIGNATURE_BYTES = 5 * 1024 * 1024;
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+function signatureImageBytes(value) {
+  if (!value) return null;
+  if (!Buffer.isBuffer(value) && !(value instanceof Uint8Array)) {
+    throw new Error('Signature image must be PNG bytes');
+  }
+  const data = Buffer.from(value);
+  if (data.length < 33 || data.length > MAX_SIGNATURE_BYTES) {
+    throw new Error('Signature image is empty or too large');
+  }
+  if (!data.subarray(0, 8).equals(PNG_MAGIC)) {
+    throw new Error('Signature image is not a valid PNG');
+  }
+  const width = data.readUInt32BE(16);
+  const height = data.readUInt32BE(20);
+  if (!width || !height || width > 4096 || height > 4096) {
+    throw new Error('Signature image dimensions are invalid');
+  }
+  return data;
+}
 
 /**
  * Create (once) or load a local self-signed signing identity.
@@ -86,6 +108,7 @@ function stamp(date) {
  * @param {Buffer|Uint8Array} pdfBytes
  * @param {{pageIndex:number, rect:{x:number,y:number,w:number,h:number},
  *          name:string, reason?:string, location?:string, contactInfo?:string,
+ *          signatureImage?:Buffer|Uint8Array,
  *          signer:{p12:Buffer,passphrase:string}}} opts
  */
 async function signPdf(pdfBytes, opts) {
@@ -93,6 +116,8 @@ async function signPdf(pdfBytes, opts) {
   const page = doc.getPage(opts.pageIndex);
   const font = await doc.embedFont(StandardFonts.Helvetica);
   const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+  const signatureImage = signatureImageBytes(opts.signatureImage);
+  const image = signatureImage ? await doc.embedPng(signatureImage) : null;
   const r = opts.rect;
   const signedAt = new Date();
 
@@ -108,25 +133,51 @@ async function signPdf(pdfBytes, opts) {
     borderOpacity: 1,
   });
 
-  const lines = [
-    { text: `Digitally signed by ${opts.name || 'OmniPDF User'}`, size: 9.5, font: bold },
-    { text: stamp(signedAt), size: 7.5, font },
-  ];
-  if (opts.reason) lines.push({ text: `Reason: ${opts.reason}`, size: 7.5, font });
-  if (opts.location) lines.push({ text: `Location: ${opts.location}`, size: 7.5, font });
+  if (image) {
+    const areaX = r.x + 5;
+    const areaY = r.y + 15;
+    const areaW = Math.max(r.w - 10, 12);
+    const areaH = Math.max(r.h - 20, 8);
+    const scale = Math.min(areaW / image.width, areaH / image.height);
+    const drawW = image.width * scale;
+    const drawH = image.height * scale;
+    page.drawImage(image, {
+      x: areaX + (areaW - drawW) / 2,
+      y: areaY + (areaH - drawH) / 2,
+      width: drawW,
+      height: drawH,
+    });
 
-  let cursor = r.y + r.h - 13;
-  for (const line of lines) {
-    if (cursor < r.y + 3) break;
-    page.drawText(sanitizeWinAnsi(line.text), {
+    const caption = `${opts.name || 'OmniPDF User'} | ${stamp(signedAt)}`;
+    page.drawText(sanitizeWinAnsi(caption), {
       x: r.x + 5,
-      y: cursor,
-      size: line.size,
-      font: line.font,
-      color: rgb(0.06, 0.09, 0.16),
+      y: r.y + 4,
+      size: 6.5,
+      font,
+      color: rgb(0.42, 0.47, 0.55),
       maxWidth: Math.max(r.w - 10, 12),
     });
-    cursor -= line.size + 3.5;
+  } else {
+    const lines = [
+      { text: `Digitally signed by ${opts.name || 'OmniPDF User'}`, size: 9.5, font: bold },
+      { text: stamp(signedAt), size: 7.5, font },
+    ];
+    if (opts.reason) lines.push({ text: `Reason: ${opts.reason}`, size: 7.5, font });
+    if (opts.location) lines.push({ text: `Location: ${opts.location}`, size: 7.5, font });
+
+    let cursor = r.y + r.h - 13;
+    for (const line of lines) {
+      if (cursor < r.y + 3) break;
+      page.drawText(sanitizeWinAnsi(line.text), {
+        x: r.x + 5,
+        y: cursor,
+        size: line.size,
+        font: line.font,
+        color: rgb(0.06, 0.09, 0.16),
+        maxWidth: Math.max(r.w - 10, 12),
+      });
+      cursor -= line.size + 3.5;
+    }
   }
 
   const { pdflibAddPlaceholder } = require('@signpdf/placeholder-pdf-lib');

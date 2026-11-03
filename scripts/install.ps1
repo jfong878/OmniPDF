@@ -1,5 +1,5 @@
 param(
-  [string]$SourceDir = (Join-Path $PSScriptRoot '..\dist\OmniPDF-win32-x64'),
+  [string]$SourceDir = (Join-Path $PSScriptRoot '..\dist\win-unpacked'),
   [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\OmniPDF'),
   [switch]$SkipPin
 )

@@ -6,75 +6,319 @@ const CMAP_URL = '/vendor/cmaps/';
 const STANDARD_FONTS = '/vendor/standard_fonts/';
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 5;
+const DEFAULT_SCALE = 1.15;
 const DPR = Math.min(window.devicePixelRatio || 1, 2);
-const BUILD_TAG = 'build-2';
+const BUILD_TAG = 'build-5';
 
 const IDS = [
   'btn-open', 'btn-save', 'btn-saveas', 'btn-prev', 'btn-next', 'page-input', 'page-total',
   'btn-zoom-out', 'btn-zoom-in', 'btn-fit', 'zoom-label', 'pages', 'viewer', 'thumbs', 'search',
   'search-count', 'status-file', 'status-msg', 'btn-rotate', 'btn-delete-page', 'btn-extract',
-  'btn-ocr', 'btn-sign', 'dlg-sign', 'sign-name', 'sign-reason', 'sign-location', 'dlg-ocr',
+  'btn-ocr', 'btn-sign', 'dlg-sign', 'sign-name', 'sign-reason', 'sign-location',
+  'sign-pad', 'sign-pad-hint', 'sign-clear', 'sign-import', 'sign-file', 'sign-save',
+  'sign-status', 'sign-saved-list', 'dlg-ocr',
   'ocr-scope', 'ocr-lang', 'dlg-text', 'text-value', 'dlg-cert', 'cert-body',
+  'tabs', 'btn-new-tab', 'dlg-confirm', 'confirm-text', 'dlg-signedit',
+  'update-banner', 'update-text', 'update-action', 'update-dismiss', 'btn-update',
+  'dlg-update', 'update-confirm-text',
 ];
 
 const el = {};
 for (const id of IDS) el[id] = document.getElementById(id);
 
-const state = {
-  bytes: null,
-  filePath: null,
-  fileName: null,
-  pdf: null,
-  pageOrder: [],
-  originalCount: 0,
-  rotations: {},
-  annotations: [],
-  formValues: {},
-  pageEls: new Map(),
-  thumbEls: new Map(),
-  textItems: new Map(),
-  searchHits: [],
-  searchActive: 0,
-  scale: 1.15,
-  tool: 'select',
-  current: 0,
-  dirty: false,
-  nextId: 1,
-  signMode: false,
-  drag: null,
-  io: null,
+/* ------------------------------------------------------------------- tabs */
+
+// One tab per open document. Only the active tab owns elements in the shared
+// viewer/sidebar; switching tears the page DOM down and rebuilds it from that
+// tab's own state so render callbacks always work against live elements.
+let tabs = [];
+let state = null; // active tab, or null when no document is open
+let tool = 'select';
+let tabSeq = 0;
+let allowUnload = false;
+
+const SIGN_PAD_W = 700;
+const SIGN_PAD_H = 200;
+const SIGNATURE_MAX_BYTES = 5 * 1024 * 1024;
+const sigPad = {
+  ctx: null,
+  dpr: 1,
+  drawing: false,
+  selectedId: null,
+  saved: [],
 };
 
+function createTab() {
+  tabSeq += 1;
+  return {
+    id: `tab-${tabSeq}`,
+    bytes: null,
+    filePath: null,
+    fileName: null,
+    pdf: null,
+    pageOrder: [],
+    originalCount: 0,
+    rotations: {},
+    annotations: [],
+    formValues: {},
+    pageEls: new Map(),
+    thumbEls: new Map(),
+    textItems: new Map(),
+    searchHits: [],
+    searchActive: 0,
+    searchQuery: '',
+    searchToken: 0,
+    searchTimer: null,
+    scale: DEFAULT_SCALE,
+    current: 0,
+    dirty: false,
+    nextId: 1,
+    signMode: false,
+    drag: null,
+    io: null,
+    scrollTop: 0,
+    closed: false,
+    ui: null,
+  };
+}
+
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
-const hasDoc = () => Boolean(state.pdf);
+const hasDoc = (s) => Boolean(s && s.pdf);
 
 function setMsg(message) {
   el['status-msg'].textContent = message || '';
 }
 
-function setDirty(value) {
-  state.dirty = value;
-  updateTitle();
+function setMsgFor(s, message) {
+  if (s === state) setMsg(message);
 }
 
 function updateTitle() {
+  if (!state) {
+    document.title = 'OmniPDF';
+    el['status-file'].textContent = 'No document';
+    return;
+  }
   const name = state.fileName || 'Untitled';
   document.title = `${state.dirty ? '• ' : ''}${name} — OmniPDF`;
-  el['status-file'].textContent = state.filePath || (hasDoc() ? name : 'No document');
+  el['status-file'].textContent = state.filePath || (hasDoc(state) ? name : 'No document');
 }
 
-/* ------------------------------------------------------------- viewports */
+function setDirty(s, value) {
+  s.dirty = value;
+  updateTabLabel(s);
+  if (s === state) updateTitle();
+}
 
-async function getViewport(idx, scale = state.scale) {
-  const page = await state.pdf.getPage(idx + 1);
-  const rotation = (((page.rotate + (state.rotations[idx] || 0)) % 360) + 360) % 360;
+function updateTabLabel(tab) {
+  if (!tab || !tab.ui) return;
+  tab.ui.label.textContent = tab.fileName || 'Untitled';
+  tab.ui.dot.hidden = !tab.dirty;
+  tab.ui.root.title = tab.filePath || tab.fileName || 'Untitled';
+  tab.ui.root.classList.toggle('is-active', tab === state);
+}
+
+function makeTabUi(tab) {
+  const root = document.createElement('div');
+  root.className = 'tab';
+  root.setAttribute('role', 'tab');
+  root.tabIndex = 0;
+
+  const label = document.createElement('span');
+  label.className = 'tab-label';
+
+  const dot = document.createElement('span');
+  dot.className = 'tab-dot';
+  dot.textContent = '\u2022';
+  dot.hidden = true;
+
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'tab-close';
+  close.textContent = '\u00d7';
+  close.title = 'Close tab (Ctrl+W)';
+
+  root.append(label, dot, close);
+  root.addEventListener('mousedown', (ev) => {
+    if (ev.button === 1) {
+      ev.preventDefault();
+      closeTab(tab);
+    } else if (ev.button === 0) {
+      activateTab(tab);
+    }
+  });
+  root.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' || ev.key === ' ') {
+      ev.preventDefault();
+      activateTab(tab);
+    }
+  });
+  close.addEventListener('mousedown', (ev) => ev.stopPropagation());
+  close.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    closeTab(tab);
+  });
+
+  el.tabs.appendChild(root);
+  tab.ui = { root, label, dot, close };
+  updateTabLabel(tab);
+}
+
+function newTab() {
+  const tab = createTab();
+  tabs.push(tab);
+  makeTabUi(tab);
+  activateTab(tab);
+  return tab;
+}
+
+function activateTab(tab) {
+  if (!tab || tab.closed) return Promise.resolve();
+  if (tab === state) {
+    syncChrome(tab);
+    return Promise.resolve();
+  }
+
+  const prev = state;
+  if (prev) {
+    prev.scrollTop = el.viewer.scrollTop;
+    if (prev.io) {
+      prev.io.disconnect();
+      prev.io = null;
+    }
+    prev.pageEls.clear();
+    prev.thumbEls.clear();
+    prev.drag = null;
+    prev.signMode = false;
+  }
+  document.body.classList.remove('sign-mode');
+  el['btn-sign'].classList.remove('is-active');
+
+  state = tab;
+  for (const t of tabs) {
+    if (t.ui) t.ui.root.classList.toggle('is-active', t === tab);
+  }
+
+  el.pages.innerHTML = '';
+  el.thumbs.innerHTML = '';
+  el.viewer.scrollTop = 0;
+  syncChrome(tab);
+
+  if (tab.pdf) {
+    return buildPages(tab)
+      .then(() => {
+        if (state !== tab) return;
+        el.viewer.scrollTop = tab.scrollTop || 0;
+        updateCurrentPage(tab);
+        const count = tab.pageOrder.length;
+        setMsg(`${count} page${count === 1 ? '' : 's'}`);
+      })
+      .catch(() => {});
+  }
+  setMsg('');
+  return Promise.resolve();
+}
+
+function confirmDiscard(name) {
+  el['confirm-text'].textContent =
+    `Close “${name || 'Untitled'}” without saving? Changes that were not saved will be lost.`;
+  return openDialog(el['dlg-confirm']);
+}
+
+async function closeTab(tab) {
+  const target = tab || state;
+  if (!target || target.closed) return;
+
+  if (target.dirty) {
+    const ok = await confirmDiscard(target.fileName);
+    if (!ok) return;
+  }
+
+  const pos = tabs.indexOf(target);
+  if (pos < 0) return;
+  const wasActive = target === state;
+
+  target.closed = true;
+  tabs.splice(pos, 1);
+  if (target.ui) {
+    target.ui.root.remove();
+    target.ui = null;
+  }
+  if (target.io) {
+    target.io.disconnect();
+    target.io = null;
+  }
+  try {
+    if (target.pdf) await target.pdf.destroy();
+  } catch {
+    /* ignore */
+  }
+
+  if (!wasActive) return;
+
+  state = null;
+  target.pageEls.clear();
+  target.thumbEls.clear();
+  el.pages.innerHTML = '';
+  el.thumbs.innerHTML = '';
+  document.body.classList.remove('sign-mode');
+  el['btn-sign'].classList.remove('is-active');
+
+  const next = tabs[Math.min(pos, tabs.length - 1)] || null;
+  if (next) {
+    activateTab(next);
+  } else {
+    syncChrome(null);
+    setMsg('');
+  }
+}
+
+function cycleTabs(delta) {
+  if (tabs.length < 2) return;
+  const pos = tabs.indexOf(state);
+  if (pos < 0) return;
+  activateTab(tabs[(pos + delta + tabs.length) % tabs.length]);
+}
+
+function syncChrome(s) {
+  document.body.classList.toggle('has-document', hasDoc(s));
+  if (!s) {
+    el['page-total'].textContent = '/ 0';
+    el['page-input'].max = '1';
+    el['page-input'].value = '1';
+    el['zoom-label'].textContent = '100%';
+    el['search-count'].textContent = '';
+    el.search.value = '';
+    updateTitle();
+    return;
+  }
+  el['page-total'].textContent = `/ ${s.pageOrder.length}`;
+  el['page-input'].max = String(Math.max(1, s.pageOrder.length));
+  el['page-input'].value = String(Math.min(s.current + 1, Math.max(1, s.pageOrder.length)));
+  el['zoom-label'].textContent = `${Math.round(s.scale * 100)}%`;
+  el['search-count'].textContent = s.searchQuery
+    ? s.searchHits.length
+      ? `${Math.min(s.searchActive + 1, s.searchHits.length)}/${s.searchHits.length}`
+      : '0'
+    : '';
+  el.search.value = s.searchQuery || '';
+  updateTitle();
+}
+
+/* -------------------------------------------------------------- viewports */
+
+async function getViewport(s, idx, scale = s.scale) {
+  const page = await s.pdf.getPage(idx + 1);
+  const rotation = (((page.rotate + (s.rotations[idx] || 0)) % 360) + 360) % 360;
   return page.getViewport({ scale, rotation });
 }
 
 /* ------------------------------------------------------------ open/reload */
 
-async function openBytes(bytes, name, filePath) {
-  setMsg('Loading…');
+async function openBytes(s, bytes, name, filePath) {
+  if (!s || s.closed) return;
+  setMsgFor(s, 'Loading…');
+
   const doc = await pdfjsLib.getDocument({
     data: bytes.slice(),
     cMapUrl: CMAP_URL,
@@ -84,52 +328,81 @@ async function openBytes(bytes, name, filePath) {
     useSystemFonts: true,
   }).promise;
 
-  if (state.pdf) {
+  if (s.closed) {
     try {
-      await state.pdf.destroy();
+      await doc.destroy();
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
+
+  if (s.pdf) {
+    try {
+      await s.pdf.destroy();
     } catch {
       /* ignore */
     }
   }
 
-  state.pdf = doc;
-  state.bytes = bytes;
-  state.fileName = name;
-  state.filePath = filePath || null;
-  state.pageOrder = Array.from({ length: doc.numPages }, (_, i) => i);
-  state.originalCount = doc.numPages;
-  state.rotations = {};
-  state.annotations = [];
-  state.formValues = {};
-  state.searchHits = [];
-  state.searchActive = 0;
-  state.current = 0;
-  state.nextId = 1;
-  state.signMode = false;
-  state.pageEls.clear();
-  state.thumbEls.clear();
-  state.textItems.clear();
+  s.pdf = doc;
+  s.bytes = bytes;
+  s.fileName = name;
+  s.filePath = filePath || null;
+  s.pageOrder = Array.from({ length: doc.numPages }, (_, i) => i);
+  s.originalCount = doc.numPages;
+  s.rotations = {};
+  s.annotations = [];
+  s.formValues = {};
+  s.searchHits = [];
+  s.searchActive = 0;
+  s.searchQuery = '';
+  s.searchToken += 1;
+  s.current = 0;
+  s.nextId = 1;
+  s.signMode = false;
+  s.drag = null;
+  s.scrollTop = 0;
+  s.pageEls.clear();
+  s.thumbEls.clear();
+  s.textItems.clear();
+  updateTabLabel(s);
 
-  document.body.classList.add('has-document');
-  el['page-total'].textContent = `/ ${doc.numPages}`;
-  el['page-input'].max = String(doc.numPages);
-  el['page-input'].value = '1';
-  el['search-count'].textContent = '';
-  el.search.value = '';
-  setDirty(false);
-
-  await buildPages();
+  if (s === state) {
+    syncChrome(s);
+    await buildPages(s);
+    if (s === state) {
+      setMsg(`${doc.numPages} page${doc.numPages === 1 ? '' : 's'}`);
+    }
+  }
+  setDirty(s, false);
   updateTitle();
-  setMsg(`${doc.numPages} page${doc.numPages === 1 ? '' : 's'}`);
 }
 
-async function buildPages() {
+async function buildPages(s) {
+  if (s !== state) return;
   el.pages.innerHTML = '';
   el.thumbs.innerHTML = '';
+  s.pageEls.clear();
+  s.thumbEls.clear();
+  if (s.io) s.io.disconnect();
+  s.io = new IntersectionObserver(
+    (entries) => {
+      if (s !== state) return;
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const idx = Number(entry.target.dataset.idx);
+        if (!s.pageEls.has(idx)) continue;
+        renderPage(s, idx).catch(() => {});
+      }
+    },
+    { root: el.viewer, rootMargin: '700px 0px' }
+  );
 
-  for (let pos = 0; pos < state.pageOrder.length; pos += 1) {
-    const idx = state.pageOrder[pos];
-    const vp = await getViewport(idx);
+  for (let pos = 0; pos < s.pageOrder.length; pos += 1) {
+    const idx = s.pageOrder[pos];
+    const vp = await getViewport(s, idx);
+    if (s !== state) return;
 
     const div = document.createElement('div');
     div.className = 'page';
@@ -141,34 +414,35 @@ async function buildPages() {
       '<div class="search-layer"></div><canvas class="anno-layer"></canvas><div class="form-layer"></div>';
 
     const overlay = div.querySelector('.anno-layer');
-    overlay.addEventListener('pointerdown', (ev) => onOverlayDown(ev, idx));
+    overlay.addEventListener('pointerdown', (ev) => onOverlayDown(s, ev, idx));
 
     el.pages.appendChild(div);
-    state.pageEls.set(idx, { div, vp, rendered: '', renderSeq: 0, widgets: [] });
-    state.io.observe(div);
+    s.pageEls.set(idx, { div, vp, rendered: '', renderSeq: 0, widgets: [] });
+    s.io.observe(div);
 
     const thumb = document.createElement('div');
     thumb.className = 'thumb';
     thumb.innerHTML = `<canvas></canvas><span class="thumb-label">${pos + 1}</span>`;
-    thumb.addEventListener('click', () => scrollToPage(pos));
+    thumb.addEventListener('click', () => scrollToPage(s, pos));
     el.thumbs.appendChild(thumb);
-    state.thumbEls.set(idx, thumb);
+    s.thumbEls.set(idx, thumb);
   }
 
   // Thumbnails render after the first pages so opening feels immediate.
-  setTimeout(() => {
-    renderThumbs().catch(() => {});
+  window.setTimeout(() => {
+    if (s === state) renderThumbs(s).catch(() => {});
   }, 60);
 }
 
-async function renderThumbs() {
-  for (const idx of state.pageOrder) {
-    const thumb = state.thumbEls.get(idx);
+async function renderThumbs(s) {
+  for (const idx of s.pageOrder) {
+    if (s !== state || s.closed) return;
+    const thumb = s.thumbEls.get(idx);
     if (!thumb || thumb.dataset.done === '1') continue;
     try {
-      const page = await state.pdf.getPage(idx + 1);
+      const page = await s.pdf.getPage(idx + 1);
       const base = page.getViewport({ scale: 1 });
-      const rotation = (((page.rotate + (state.rotations[idx] || 0)) % 360) + 360) % 360;
+      const rotation = (((page.rotate + (s.rotations[idx] || 0)) % 360) + 360) % 360;
       const scale = 146 / Math.max(base.width, 1);
       const vp = page.getViewport({ scale, rotation });
       const canvas = thumb.querySelector('canvas');
@@ -187,27 +461,27 @@ async function renderThumbs() {
 // Renders are serialised per page. pdf.js cancels an in-flight render when a
 // second one starts on the same canvas, which previously let a caller await a
 // render that returned early without building the text/widget layers.
-function renderPage(idx) {
-  const entry = state.pageEls.get(idx);
-  if (!entry || !state.pdf) return Promise.resolve();
+function renderPage(s, idx) {
+  const entry = s.pageEls.get(idx);
+  if (!entry || !s.pdf) return Promise.resolve();
   entry.chain = (entry.chain || Promise.resolve())
-    .then(() => doRenderPage(idx))
+    .then(() => doRenderPage(s, idx))
     .catch(() => {});
   return entry.chain;
 }
 
-async function doRenderPage(idx) {
-  const entry = state.pageEls.get(idx);
-  if (!entry || !state.pdf) return;
+async function doRenderPage(s, idx) {
+  const entry = s.pageEls.get(idx);
+  if (!entry || !s.pdf || s !== state) return;
 
-  const page = await state.pdf.getPage(idx + 1);
-  const rotation = (((page.rotate + (state.rotations[idx] || 0)) % 360) + 360) % 360;
-  const vp = page.getViewport({ scale: state.scale, rotation });
-  const key = `${state.scale}|${rotation}`;
+  const page = await s.pdf.getPage(idx + 1);
+  const rotation = (((page.rotate + (s.rotations[idx] || 0)) % 360) + 360) % 360;
+  const vp = page.getViewport({ scale: s.scale, rotation });
+  const key = `${s.scale}|${rotation}`;
 
   // A blank `rendered` marks the page stale; the key check skips redundant work.
   if (entry.rendered === key) {
-    await layoutPage(idx);
+    await layoutPage(s, idx);
     return;
   }
 
@@ -215,7 +489,7 @@ async function doRenderPage(idx) {
   const seq = entry.renderSeq;
 
   const canvas = entry.div.querySelector('.page-canvas');
-  const scaled = page.getViewport({ scale: state.scale * DPR, rotation });
+  const scaled = page.getViewport({ scale: s.scale * DPR, rotation });
   canvas.width = Math.max(1, Math.floor(scaled.width));
   canvas.height = Math.max(1, Math.floor(scaled.height));
 
@@ -237,13 +511,13 @@ async function doRenderPage(idx) {
   }
   entry.vp = vp;
 
-  await buildTextLayer(idx, page, vp);
-  await buildWidgets(idx, page, vp);
-  await layoutPage(idx);
+  await buildTextLayer(s, idx, page, vp);
+  await buildWidgets(s, idx, page, vp);
+  await layoutPage(s, idx);
 }
 
-async function buildTextLayer(idx, page, vp) {
-  const entry = state.pageEls.get(idx);
+async function buildTextLayer(s, idx, page, vp) {
+  const entry = s.pageEls.get(idx);
   if (!entry) return;
 
   let content;
@@ -253,7 +527,7 @@ async function buildTextLayer(idx, page, vp) {
     return;
   }
 
-  state.textItems.set(idx, content.items.filter((i) => i.str && i.str.trim()));
+  s.textItems.set(idx, content.items.filter((i) => i.str && i.str.trim()));
 
   const layer = entry.div.querySelector('.text-layer');
   layer.innerHTML = '';
@@ -290,8 +564,8 @@ async function buildTextLayer(idx, page, vp) {
   }
 }
 
-async function buildWidgets(idx, page, vp) {
-  const entry = state.pageEls.get(idx);
+async function buildWidgets(s, idx, page, vp) {
+  const entry = s.pageEls.get(idx);
   if (!entry || entry.widgetsBuilt) return;
   const layer = entry.div.querySelector('.form-layer');
   layer.innerHTML = '';
@@ -360,17 +634,26 @@ async function buildWidgets(idx, page, vp) {
     }
 
     const name = ann.fieldName;
+    // Values typed before a tab switch live in the tab state, not the PDF, so
+    // rebuilding the form layer has to put them back on top of the defaults.
+    if (Object.prototype.hasOwnProperty.call(s.formValues, name)) {
+      const stored = s.formValues[name];
+      if (input.type === 'checkbox') input.checked = stored === 'true';
+      else if (input.type === 'radio') input.checked = input.value === stored;
+      else if (input.tagName !== 'BUTTON') input.value = stored;
+    }
+
     const commit = () => {
-      if (input.type === 'checkbox') state.formValues[name] = input.checked ? 'true' : 'false';
+      if (input.type === 'checkbox') s.formValues[name] = input.checked ? 'true' : 'false';
       else if (input.type === 'radio') {
-        if (input.checked) state.formValues[name] = input.value;
-      } else state.formValues[name] = input.value;
-      setDirty(true);
+        if (input.checked) s.formValues[name] = input.value;
+      } else s.formValues[name] = input.value;
+      setDirty(s, true);
     };
     input.addEventListener('input', commit);
     input.addEventListener('change', commit);
     if (fieldType === 'Sig') {
-      input.addEventListener('click', () => beginSign());
+      input.addEventListener('click', () => beginSign(s));
     }
 
     layer.appendChild(input);
@@ -420,11 +703,11 @@ function viewportRect(vp, rect) {
   };
 }
 
-async function layoutPage(idx) {
-  const entry = state.pageEls.get(idx);
+async function layoutPage(s, idx) {
+  const entry = s.pageEls.get(idx);
   if (!entry) return;
 
-  if (!entry.vp) entry.vp = await getViewport(idx);
+  if (!entry.vp) entry.vp = await getViewport(s, idx);
   const vp = entry.vp;
   const width = parseFloat(entry.div.style.width) || vp.width;
   const height = parseFloat(entry.div.style.height) || vp.height;
@@ -434,7 +717,7 @@ async function layoutPage(idx) {
   overlay.height = Math.max(1, Math.floor(height * DPR));
   overlay.style.width = `${width}px`;
   overlay.style.height = `${height}px`;
-  overlay.classList.toggle('is-active', state.tool !== 'select' || state.signMode);
+  overlay.classList.toggle('is-active', tool !== 'select' || s.signMode);
 
   for (const { ann, input } of entry.widgets) {
     if (!ann.rect || !ann.rect.length) continue;
@@ -450,12 +733,12 @@ async function layoutPage(idx) {
     input.style.height = `${Math.max(r.h, 8)}px`;
   }
 
-  paintAnnotations(idx);
-  paintSearch(idx);
+  paintAnnotations(s, idx);
+  paintSearch(s, idx);
 }
 
-function paintAnnotations(idx) {
-  const entry = state.pageEls.get(idx);
+function paintAnnotations(s, idx) {
+  const entry = s.pageEls.get(idx);
   if (!entry) return;
   const canvas = entry.div.querySelector('.anno-layer');
   const ctx = canvas.getContext('2d');
@@ -466,8 +749,8 @@ function paintAnnotations(idx) {
   const vp = entry.vp;
   if (!vp) return;
 
-  const items = state.annotations.filter((a) => a.page === idx);
-  if (state.drag && state.drag.page === idx) items.push(state.drag.preview);
+  const items = s.annotations.filter((a) => a.page === idx);
+  if (s.drag && s.drag.page === idx) items.push(s.drag.preview);
 
   for (const ann of items) {
     if (ann.type === 'ink') {
@@ -508,18 +791,19 @@ function paintAnnotations(idx) {
   }
 }
 
-function paintSearch(idx) {
-  const entry = state.pageEls.get(idx);
+function paintSearch(s, idx) {
+  if (s !== state) return;
+  const entry = s.pageEls.get(idx);
   if (!entry || !entry.vp) return;
   const layer = entry.div.querySelector('.search-layer');
   layer.innerHTML = '';
-  if (!state.searchHits.length) return;
+  if (!s.searchHits.length) return;
   const vp = entry.vp;
-  for (const hit of state.searchHits.filter((h) => h.page === idx)) {
+  for (const hit of s.searchHits.filter((h) => h.page === idx)) {
     const tx = multiply(vp.transform, hit.item.transform);
     const height = Math.hypot(tx[2], tx[3]) || 10;
     const div = document.createElement('div');
-    const active = state.searchHits[state.searchActive] === hit;
+    const active = s.searchHits[s.searchActive] === hit;
     div.className = active ? 'search-hit is-active' : 'search-hit';
     div.style.left = `${tx[4]}px`;
     div.style.top = `${tx[5] - height}px`;
@@ -543,47 +827,47 @@ function localPoint(ev, div) {
   return [ev.clientX - box.left, ev.clientY - box.top];
 }
 
-function pointerToUser(ev, idx) {
-  const entry = state.pageEls.get(idx);
+function pointerToUser(s, ev, idx) {
+  const entry = s.pageEls.get(idx);
   if (!entry || !entry.vp) return null;
   const [px, py] = localPoint(ev, entry.div);
   const [ux, uy] = toUser(entry.vp, px, py);
   return { px, py, ux, uy, vp: entry.vp };
 }
 
-function onOverlayDown(ev, idx) {
-  if (!hasDoc() || ev.button !== 0) return;
-  const point = pointerToUser(ev, idx);
+function onOverlayDown(s, ev, idx) {
+  if (!hasDoc(s) || s !== state || ev.button !== 0) return;
+  const point = pointerToUser(s, ev, idx);
   if (!point) return;
 
-  if (state.signMode) {
-    placeSignature(ev, idx).catch((err) => setMsg(String(err.message || err)));
+  if (s.signMode) {
+    placeSignature(s, ev, idx).catch((err) => setMsg(String(err.message || err)));
     return;
   }
-  if (state.tool === 'select') return;
+  if (tool === 'select') return;
 
   ev.preventDefault();
   ev.target.setPointerCapture(ev.pointerId);
 
-  if (state.tool === 'erase') {
-    eraseAt(idx, point.px, point.py);
+  if (tool === 'erase') {
+    eraseAt(s, idx, point.px, point.py);
     return;
   }
 
-  if (state.tool === 'ink') {
-    state.drag = {
+  if (tool === 'ink') {
+    s.drag = {
       page: idx,
       points: [[point.ux, point.uy]],
       preview: { page: idx, type: 'ink', color: '#e0453e', width: 2, points: [[point.ux, point.uy]] },
     };
   } else {
-    state.drag = {
+    s.drag = {
       page: idx,
       start: [point.ux, point.uy],
       preview: {
         page: idx,
-        type: state.tool === 'box' ? 'box' : 'highlight',
-        color: state.tool === 'box' ? '#4d8dff' : '#ffd400',
+        type: tool === 'box' ? 'box' : 'highlight',
+        color: tool === 'box' ? '#4d8dff' : '#ffd400',
         width: 1.5,
         opacity: 0.35,
         rect: { x: point.ux, y: point.uy, w: 0, h: 0 },
@@ -591,60 +875,60 @@ function onOverlayDown(ev, idx) {
     };
   }
 
-  const move = (e) => onOverlayMove(e, idx);
+  const move = (e) => onOverlayMove(s, e, idx);
   const up = (e) => {
     ev.target.removeEventListener('pointermove', move);
     ev.target.removeEventListener('pointerup', up);
-    onOverlayUp(e, idx);
+    onOverlayUp(s, e, idx);
   };
   ev.target.addEventListener('pointermove', move);
   ev.target.addEventListener('pointerup', up);
 }
 
-function onOverlayMove(ev, idx) {
-  if (!state.drag) return;
-  const point = pointerToUser(ev, idx);
+function onOverlayMove(s, ev, idx) {
+  if (!s.drag) return;
+  const point = pointerToUser(s, ev, idx);
   if (!point) return;
 
-  if (state.drag.preview.type === 'ink') {
-    state.drag.preview.points.push([point.ux, point.uy]);
+  if (s.drag.preview.type === 'ink') {
+    s.drag.preview.points.push([point.ux, point.uy]);
   } else {
-    const [sx, sy] = state.drag.start;
-    state.drag.preview.rect = {
+    const [sx, sy] = s.drag.start;
+    s.drag.preview.rect = {
       x: Math.min(sx, point.ux),
       y: Math.min(sy, point.uy),
       w: Math.abs(point.ux - sx),
       h: Math.abs(point.uy - sy),
     };
   }
-  paintAnnotations(idx);
+  paintAnnotations(s, idx);
 }
 
-async function onOverlayUp(ev, idx) {
-  const drag = state.drag;
-  state.drag = null;
+async function onOverlayUp(s, ev, idx) {
+  const drag = s.drag;
+  s.drag = null;
   if (!drag) return;
 
   if (drag.preview.type === 'ink') {
     if (drag.preview.points.length > 2) {
-      addAnnotation({ ...drag.preview, id: state.nextId++, page: idx });
+      addAnnotation(s, { ...drag.preview, id: s.nextId++, page: idx });
     }
-    paintAnnotations(idx);
+    paintAnnotations(s, idx);
     return;
   }
 
   const rect = drag.preview.rect;
   if (rect.w < 3 || rect.h < 3) {
     setMsg('Drag a larger area');
-    paintAnnotations(idx);
+    paintAnnotations(s, idx);
     return;
   }
 
-  if (state.tool === 'text') {
+  if (tool === 'text') {
     const text = await askText('');
     if (text) {
-      addAnnotation({
-        id: state.nextId++,
+      addAnnotation(s, {
+        id: s.nextId++,
         page: idx,
         type: 'text',
         color: '#ffd400',
@@ -654,8 +938,8 @@ async function onOverlayUp(ev, idx) {
       });
     }
   } else {
-    addAnnotation({
-      id: state.nextId++,
+    addAnnotation(s, {
+      id: s.nextId++,
       page: idx,
       type: drag.preview.type,
       color: drag.preview.color,
@@ -664,19 +948,19 @@ async function onOverlayUp(ev, idx) {
       rect,
     });
   }
-  paintAnnotations(idx);
+  paintAnnotations(s, idx);
 }
 
-function addAnnotation(ann) {
-  state.annotations.push(ann);
-  setDirty(true);
+function addAnnotation(s, ann) {
+  s.annotations.push(ann);
+  setDirty(s, true);
 }
 
-function eraseAt(idx, px, py) {
-  const entry = state.pageEls.get(idx);
+function eraseAt(s, idx, px, py) {
+  const entry = s.pageEls.get(idx);
   if (!entry || !entry.vp) return;
   const vp = entry.vp;
-  const candidates = state.annotations.filter((a) => a.page === idx);
+  const candidates = s.annotations.filter((a) => a.page === idx);
   for (let i = candidates.length - 1; i >= 0; i -= 1) {
     const ann = candidates[i];
     if (ann.type === 'ink') {
@@ -685,35 +969,53 @@ function eraseAt(idx, px, py) {
         return Math.hypot(p[0] - px, p[1] - py) < 9;
       });
       if (hit) {
-        removeAnnotation(ann.id);
+        removeAnnotation(s, ann.id);
         return;
       }
       continue;
     }
     const r = viewportRect(vp, ann.rect);
     if (px >= r.x - 3 && px <= r.x + r.w + 3 && py >= r.y - 3 && py <= r.y + r.h + 3) {
-      removeAnnotation(ann.id);
+      removeAnnotation(s, ann.id);
       return;
     }
   }
   setMsg('Nothing to erase there');
 }
 
-function removeAnnotation(id) {
-  state.annotations = state.annotations.filter((a) => a.id !== id);
-  setDirty(true);
-  for (const idx of state.pageOrder) paintAnnotations(idx);
+function removeAnnotation(s, id) {
+  s.annotations = s.annotations.filter((a) => a.id !== id);
+  setDirty(s, true);
+  for (const idx of s.pageOrder) paintAnnotations(s, idx);
 }
 
-/* --------------------------------------------------------------- dialogs */
+/* ---------------------------------------------------------------- dialogs */
 
 function openDialog(dialog) {
   return new Promise((resolve) => {
-    const onClose = () => {
+    const form = dialog.querySelector('form');
+    let settled = false;
+
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
       dialog.removeEventListener('close', onClose);
-      resolve(dialog.returnValue === 'ok');
+      dialog.removeEventListener('cancel', onCancel);
+      if (form) form.removeEventListener('submit', onSubmit);
+      resolve(value);
     };
+    const onClose = () => finish(dialog.returnValue === 'ok');
+    const onCancel = () => finish(false);
+    const onSubmit = (event) => {
+      // Electron's dialog implementation does not deliver close events here,
+      // so settle from the form submission and let the default close finish.
+      const value = event.submitter ? event.submitter.value : 'cancel';
+      setTimeout(() => finish(value === 'ok'), 0);
+    };
+
     dialog.addEventListener('close', onClose);
+    dialog.addEventListener('cancel', onCancel);
+    if (form) form.addEventListener('submit', onSubmit);
     dialog.returnValue = 'cancel';
     dialog.showModal();
   });
@@ -725,77 +1027,389 @@ async function askText(initial) {
   return ok ? el['text-value'].value.trim() : '';
 }
 
+function setSignStatus(message) {
+  el['sign-status'].textContent = message || '';
+}
+
+function clearSignaturePad(clearSelection = true) {
+  const canvas = el['sign-pad'];
+  const ctx = canvas.getContext('2d');
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.restore();
+  sigPad.drawing = false;
+  if (clearSelection) {
+    sigPad.selectedId = null;
+  }
+  el['sign-pad-hint'].hidden = false;
+}
+
+function setupSignaturePad() {
+  const canvas = el['sign-pad'];
+  const ctx = canvas.getContext('2d');
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = SIGN_PAD_W * dpr;
+  canvas.height = SIGN_PAD_H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = '#10151f';
+  ctx.lineWidth = 2.4;
+  sigPad.ctx = ctx;
+  sigPad.dpr = dpr;
+
+  const pointFor = (ev) => {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: clamp((ev.clientX - rect.left) * (SIGN_PAD_W / rect.width), 0, SIGN_PAD_W),
+      y: clamp((ev.clientY - rect.top) * (SIGN_PAD_H / rect.height), 0, SIGN_PAD_H),
+    };
+  };
+
+  canvas.addEventListener('pointerdown', (ev) => {
+    if (!ev.isPrimary || (ev.pointerType === 'mouse' && ev.button !== 0)) return;
+    ev.preventDefault();
+    try {
+      canvas.setPointerCapture(ev.pointerId);
+    } catch {
+      /* ignore */
+    }
+    sigPad.drawing = true;
+    sigPad.selectedId = null;
+    el['sign-pad-hint'].hidden = true;
+    setSignStatus('');
+    renderSavedSignatures();
+    const p = pointFor(ev);
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(p.x + 0.01, p.y);
+    ctx.stroke();
+  });
+
+  canvas.addEventListener('pointermove', (ev) => {
+    if (!sigPad.drawing) return;
+    ev.preventDefault();
+    const coalesced = typeof ev.getCoalescedEvents === 'function' ? ev.getCoalescedEvents() : [];
+    const events = coalesced.length ? coalesced : [ev];
+    for (const item of events) {
+      const p = pointFor(item);
+      ctx.lineTo(p.x, p.y);
+    }
+    ctx.stroke();
+  });
+
+  const endStroke = (ev) => {
+    if (!sigPad.drawing) return;
+    sigPad.drawing = false;
+    try {
+      canvas.releasePointerCapture(ev.pointerId);
+    } catch {
+      /* ignore */
+    }
+  };
+  canvas.addEventListener('pointerup', endStroke);
+  canvas.addEventListener('pointercancel', endStroke);
+
+  el['sign-clear'].addEventListener('click', () => {
+    clearSignaturePad();
+    setSignStatus('');
+    renderSavedSignatures();
+  });
+
+  el['sign-import'].addEventListener('click', () => el['sign-file'].click());
+
+  el['sign-save'].addEventListener('click', () => {
+    saveCurrentSignature(el['sign-name'].value.trim() || 'Signature');
+  });
+
+  el['sign-file'].addEventListener('change', async () => {
+    const file = el['sign-file'].files && el['sign-file'].files[0];
+    el['sign-file'].value = '';
+    if (!file) return;
+    if (file.size > SIGNATURE_MAX_BYTES) {
+      setSignStatus('Signature image must be under 5 MB');
+      return;
+    }
+    if (!/^image\/(png|jpeg)$/i.test(file.type) && !/\.(png|jpe?g)$/i.test(file.name)) {
+      setSignStatus('Choose a PNG or JPEG signature image');
+      return;
+    }
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      await loadImageToPad(dataUrl);
+      if (!signatureDataUrl()) {
+        setSignStatus('That image appears blank');
+        return;
+      }
+      const name = file.name.replace(/\.[^.]+$/, '').trim().slice(0, 60) || 'Imported signature';
+      const saved = await saveCurrentSignature(name);
+      if (saved) setSignStatus(`Imported and saved “${saved.name}”`);
+    } catch (err) {
+      setSignStatus(String(err.message || err));
+    }
+  });
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Could not read the signature image'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImageToPad(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      if (!image.width || !image.height) {
+        reject(new Error('Signature image is empty'));
+        return;
+      }
+      clearSignaturePad(false);
+      const boxW = SIGN_PAD_W - 32;
+      const boxH = SIGN_PAD_H - 24;
+      const scale = Math.min(boxW / image.width, boxH / image.height);
+      const w = image.width * scale;
+      const h = image.height * scale;
+      sigPad.ctx.drawImage(image, (SIGN_PAD_W - w) / 2, (SIGN_PAD_H - h) / 2, w, h);
+      el['sign-pad-hint'].hidden = true;
+      resolve();
+    };
+    image.onerror = () => reject(new Error('Could not read the signature image'));
+    image.src = dataUrl;
+  });
+}
+
+function signatureDataUrl() {
+  const canvas = el['sign-pad'];
+  const ctx = sigPad.ctx || canvas.getContext('2d');
+  const width = canvas.width;
+  const height = canvas.height;
+  const pixels = ctx.getImageData(0, 0, width, height).data;
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const i = (y * width + x) * 4;
+      if (pixels[i + 3] < 16) continue;
+      if (pixels[i] > 248 && pixels[i + 1] > 248 && pixels[i + 2] > 248) continue;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  if (maxX < minX) return null;
+
+  const margin = Math.round(12 * sigPad.dpr);
+  const sx = Math.max(0, minX - margin);
+  const sy = Math.max(0, minY - margin);
+  const sw = Math.min(width - sx, maxX - minX + 1 + margin * 2);
+  const sh = Math.min(height - sy, maxY - minY + 1 + margin * 2);
+  const out = document.createElement('canvas');
+  out.width = sw;
+  out.height = sh;
+  out.getContext('2d').drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+  return out.toDataURL('image/png');
+}
+
+function signatureBase64() {
+  const dataUrl = signatureDataUrl();
+  return dataUrl ? dataUrl.split(',')[1] : '';
+}
+
+function renderSavedSignatures() {
+  const list = el['sign-saved-list'];
+  list.innerHTML = '';
+  if (!sigPad.saved.length) {
+    const empty = document.createElement('span');
+    empty.className = 'sig-saved-empty';
+    empty.textContent = 'No saved signatures yet';
+    list.appendChild(empty);
+    return;
+  }
+
+  for (const saved of sigPad.saved) {
+    const wrap = document.createElement('div');
+    wrap.className = 'sig-saved-wrap';
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `sig-saved-item${saved.id === sigPad.selectedId ? ' is-selected' : ''}`;
+    button.title = saved.name;
+    button.setAttribute('aria-label', `Use saved signature ${saved.name}`);
+
+    const image = document.createElement('img');
+    image.src = saved.dataUrl;
+    image.alt = '';
+    button.appendChild(image);
+    button.addEventListener('click', () => {
+      useSavedSignature(saved);
+    });
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'sig-saved-delete';
+    remove.textContent = '×';
+    remove.title = `Delete ${saved.name}`;
+    remove.setAttribute('aria-label', `Delete saved signature ${saved.name}`);
+    remove.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      deleteSavedSignature(saved);
+    });
+
+    wrap.append(button, remove);
+    list.appendChild(wrap);
+  }
+}
+
+async function refreshSavedSignatures() {
+  try {
+    const items = await window.omnipdf.listSignatures();
+    sigPad.saved = Array.isArray(items) ? items : [];
+  } catch (err) {
+    sigPad.saved = [];
+    setSignStatus(String(err.message || err));
+  }
+  if (sigPad.selectedId && !sigPad.saved.some((saved) => saved.id === sigPad.selectedId)) {
+    sigPad.selectedId = null;
+  }
+  renderSavedSignatures();
+}
+
+async function useSavedSignature(saved) {
+  try {
+    await loadImageToPad(saved.dataUrl);
+    sigPad.selectedId = saved.id;
+    renderSavedSignatures();
+    setSignStatus(`Using “${saved.name}”`);
+  } catch (err) {
+    setSignStatus(String(err.message || err));
+  }
+}
+
+async function saveCurrentSignature(name) {
+  setSignStatus('Saving…');
+  try {
+    const dataUrl = signatureDataUrl();
+    if (!dataUrl) {
+      setSignStatus('Draw or import a signature first');
+      return null;
+    }
+    const saved = await window.omnipdf.saveSignature({ name, dataUrl });
+    sigPad.selectedId = saved.id;
+    await refreshSavedSignatures();
+    setSignStatus(`Saved “${saved.name}”`);
+    return saved;
+  } catch (err) {
+    setSignStatus(String(err.message || err));
+    return null;
+  }
+}
+
+async function deleteSavedSignature(saved) {
+  try {
+    await window.omnipdf.deleteSignature(saved.id);
+    if (sigPad.selectedId === saved.id) {
+      sigPad.selectedId = null;
+    }
+    await refreshSavedSignatures();
+    setSignStatus(`Deleted “${saved.name}”`);
+  } catch (err) {
+    setSignStatus(String(err.message || err));
+  }
+}
+
+async function prepareSignDialog() {
+  clearSignaturePad();
+  el['sign-name'].value = el['sign-name'].value || 'OmniPDF User';
+  setSignStatus('');
+  await refreshSavedSignatures();
+}
+
 /* ---------------------------------------------------------------- signing */
 
-async function beginSign() {
-  if (!hasDoc()) return;
-  await flushEdits();
-  state.signMode = true;
+async function beginSign(s) {
+  if (!hasDoc(s) || s !== state) return;
+  await flushEdits(s);
+  if (s !== state || s.closed) return;
+  s.signMode = true;
   el['btn-sign'].classList.add('is-active');
   document.body.classList.add('sign-mode');
-  for (const idx of state.pageOrder) layoutPage(idx);
+  for (const idx of s.pageOrder) layoutPage(s, idx);
   setMsg('Click where the signature block should go');
 }
 
-async function placeSignature(ev, idx) {
-  const vp = state.pageEls.get(idx)?.vp;
-  if (!vp) return;
-  const point = pointerToUser(ev, idx);
-  const base = await getViewport(idx, 1);
+async function placeSignature(s, ev, idx) {
+  const entry = s.pageEls.get(idx);
+  if (!entry || !entry.vp) return;
+  const point = pointerToUser(s, ev, idx);
+  if (!point) return;
+  const base = await getViewport(s, idx, 1);
+  if (s !== state || s.closed) return;
 
-  const w = Math.min(230, base.width * 0.62);
-  const h = Math.min(68, base.height * 0.17);
+  const w = Math.min(250, base.width * 0.64);
+  const h = Math.min(86, base.height * 0.22);
   const x = clamp(point.ux, 4, Math.max(4, base.width - w - 4));
   const y = clamp(point.uy - h, 4, Math.max(4, base.height - h - 4));
 
-  state.signMode = false;
+  s.signMode = false;
   document.body.classList.remove('sign-mode');
   el['btn-sign'].classList.remove('is-active');
 
   el['sign-name'].value = el['sign-name'].value || 'OmniPDF User';
+  await prepareSignDialog();
   const ok = await openDialog(el['dlg-sign']);
   if (!ok) {
     setMsg('Signing cancelled');
-    for (const i of state.pageOrder) layoutPage(i);
+    for (const i of s.pageOrder) layoutPage(s, i);
     return;
   }
 
   setMsg('Signing…');
   const result = await window.omnipdf.sign({
-    bytes: state.bytes,
+    bytes: s.bytes,
     pageIndex: idx,
     rect: { x, y, w, h },
     name: el['sign-name'].value.trim() || 'OmniPDF User',
     reason: el['sign-reason'].value.trim(),
     location: el['sign-location'].value.trim(),
+    signatureImage: signatureBase64() || undefined,
     formValues: {},
     annotations: [],
     pageOps: { rotations: {} },
   });
 
-  await openBytes(result.bytes, state.fileName, state.filePath);
-  setDirty(true);
-  setMsg('Signed — save to write the signature to disk');
+  if (s.closed) return;
+  await openBytes(s, result.bytes, s.fileName, s.filePath);
+  setDirty(s, true);
+  setMsgFor(s, 'Signed — save to write the signature to disk');
 }
 
 /* ------------------------------------------------------------------- edit */
 
-function editPayload() {
-  const kept = new Set(state.pageOrder);
+function editPayload(s) {
+  const kept = new Set(s.pageOrder);
   const deletes = [];
-  for (let i = 0; i < state.originalCount; i += 1) {
+  for (let i = 0; i < s.originalCount; i += 1) {
     if (!kept.has(i)) deletes.push(i);
   }
   return {
-    bytes: state.bytes,
-    formValues: state.formValues,
-    annotations: state.annotations,
-    pageOps: { rotations: state.rotations, deletes },
+    bytes: s.bytes,
+    formValues: s.formValues,
+    annotations: s.annotations,
+    pageOps: { rotations: s.rotations, deletes },
   };
 }
 
-async function buildEditedBytes() {
-  const result = await window.omnipdf.edit(editPayload());
+async function buildEditedBytes(s) {
+  const result = await window.omnipdf.edit(editPayload(s));
   if (result.errors && result.errors.length) {
     setMsg(`Completed with warnings: ${result.errors.slice(0, 2).join('; ')}`);
   }
@@ -803,48 +1417,83 @@ async function buildEditedBytes() {
 }
 
 /** Bake pending edits into memory so index-based actions (OCR, sign) stay valid. */
-async function flushEdits() {
-  if (!hasDoc()) return;
-  if (!state.annotations.length && !Object.keys(state.formValues).length &&
-      !Object.keys(state.rotations).length &&
-      state.pageOrder.length === state.originalCount) {
+async function flushEdits(s) {
+  if (!hasDoc(s) || s.closed) return;
+  if (
+    !s.annotations.length &&
+    !Object.keys(s.formValues).length &&
+    !Object.keys(s.rotations).length &&
+    s.pageOrder.length === s.originalCount
+  ) {
     return;
   }
-  const bytes = await buildEditedBytes();
-  await openBytes(bytes, state.fileName, state.filePath);
+  const bytes = await buildEditedBytes(s);
+  if (s.closed) return;
+  await openBytes(s, bytes, s.fileName, s.filePath);
 }
 
-async function save(asNew) {
-  if (!hasDoc()) return;
-  setMsg('Saving…');
-  const bytes = await buildEditedBytes();
+function pdfHasSignature(bytes) {
+  try {
+    return new TextDecoder('latin1').decode(bytes).includes('/ByteRange');
+  } catch {
+    return false;
+  }
+}
 
-  let target = state.filePath;
+function hasPendingEdits(s) {
+  return Boolean(
+    s.annotations.length ||
+      Object.keys(s.formValues).length ||
+      Object.keys(s.rotations).length ||
+      s.pageOrder.length !== s.originalCount
+  );
+}
+
+async function save(s, asNew) {
+  if (!hasDoc(s) || s.closed) return;
+  const signed = pdfHasSignature(s.bytes);
+  const pending = hasPendingEdits(s);
+
+  if (signed && pending) {
+    const ok = await openDialog(el['dlg-signedit']);
+    if (!ok) {
+      setMsgFor(s, 'Save cancelled');
+      return;
+    }
+  }
+
+  setMsgFor(s, 'Saving…');
+  // A signed PDF must be written byte-for-byte. Running it through the edit
+  // pipeline would rewrite the document and strip its signature dictionary.
+  const bytes = signed && !pending ? s.bytes : await buildEditedBytes(s);
+
+  let target = s.filePath;
   if (asNew || !target) {
     const out = await window.omnipdf.saveAs({
       bytes,
-      suggestedName: state.fileName || 'document.pdf',
+      suggestedName: s.fileName || 'document.pdf',
     });
     if (!out) {
-      setMsg('Save cancelled');
+      setMsgFor(s, 'Save cancelled');
       return;
     }
     target = out.path;
-    state.fileName = out.name;
-    state.filePath = out.path;
+    s.fileName = out.name;
+    s.filePath = out.path;
   } else {
     await window.omnipdf.save({ path: target, bytes });
   }
 
-  await openBytes(bytes, state.fileName, target);
-  setDirty(false);
-  setMsg('Saved');
+  if (s.closed) return;
+  await openBytes(s, bytes, s.fileName, target);
+  setDirty(s, false);
+  setMsgFor(s, signed && pending ? 'Saved a modified copy; the previous signature was removed' : 'Saved');
 }
 
-async function extractCurrent() {
-  if (!hasDoc()) return;
-  const bytes = await buildEditedBytes();
-  const pageIndex = state.current;
+async function extractCurrent(s) {
+  if (!hasDoc(s) || s !== state) return;
+  const bytes = await buildEditedBytes(s);
+  const pageIndex = s.current;
   const out = await window.omnipdf.extract({ bytes, indices: [pageIndex] });
   if (!out) return;
   const saved = await window.omnipdf.saveAs({
@@ -856,9 +1505,9 @@ async function extractCurrent() {
 
 /* -------------------------------------------------------------------- OCR */
 
-async function rasterize(idx, scale, lang) {
-  const page = await state.pdf.getPage(idx + 1);
-  const rotation = (((page.rotate + (state.rotations[idx] || 0)) % 360) + 360) % 360;
+async function rasterize(s, idx, scale, lang) {
+  const page = await s.pdf.getPage(idx + 1);
+  const rotation = (((page.rotate + (s.rotations[idx] || 0)) % 360) + 360) % 360;
   const vp = page.getViewport({ scale, rotation });
   const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, Math.floor(vp.width));
@@ -879,96 +1528,108 @@ async function rasterize(idx, scale, lang) {
   };
 }
 
-async function runOcr() {
-  if (!hasDoc()) return;
+async function runOcr(s) {
+  if (!hasDoc(s) || s !== state) return;
   const ok = await openDialog(el['dlg-ocr']);
-  if (!ok) return;
+  if (!ok || s !== state) return;
 
   const scope = el['ocr-scope'].value;
   const lang = el['ocr-lang'].value;
 
-  await flushEdits();
+  await flushEdits(s);
+  if (s !== state || s.closed) return;
 
-  const targets = scope === 'current' ? [state.pageOrder[state.current]] : state.pageOrder.slice();
+  const targets = scope === 'current' ? [s.pageOrder[s.current]] : s.pageOrder.slice();
   const pages = [];
   for (const idx of targets) {
     setMsg(`Rasterising page ${pages.length + 1} of ${targets.length}…`);
-    pages.push(await rasterize(idx, 200 / 72, lang));
+    pages.push(await rasterize(s, idx, 200 / 72, lang));
   }
 
   setMsg(`Running OCR on ${pages.length} page${pages.length === 1 ? '' : 's'} — this may take a while…`);
   try {
-    const result = await window.omnipdf.ocr({ bytes: state.bytes, pages, formValues: {}, annotations: [], pageOps: { rotations: {} } });
-    await openBytes(result.bytes, state.fileName, state.filePath);
-    setDirty(true);
+    const result = await window.omnipdf.ocr({
+      bytes: s.bytes,
+      pages,
+      formValues: {},
+      annotations: [],
+      pageOps: { rotations: {} },
+    });
+    if (s.closed) return;
+    await openBytes(s, result.bytes, s.fileName, s.filePath);
+    setDirty(s, true);
     const words = result.results.reduce((sum, r) => sum + r.wordCount, 0);
     const conf = result.results.length
       ? Math.round(result.results.reduce((sum, r) => sum + r.confidence, 0) / result.results.length)
       : 0;
-    setMsg(`OCR complete: ${words} words, mean confidence ${conf}% — save to keep the text layer`);
+    setMsgFor(s, `OCR complete: ${words} words, mean confidence ${conf}% — save to keep the text layer`);
   } catch (err) {
-    setMsg(`OCR failed: ${err.message || err}`);
+    setMsgFor(s, `OCR failed: ${err.message || err}`);
   }
 }
 
 /* ----------------------------------------------------------------- search */
 
-async function getTextItems(idx) {
-  if (state.textItems.has(idx)) return state.textItems.get(idx);
-  const page = await state.pdf.getPage(idx + 1);
+async function getTextItems(s, idx) {
+  if (s.textItems.has(idx)) return s.textItems.get(idx);
+  const page = await s.pdf.getPage(idx + 1);
   const content = await page.getTextContent();
   const items = content.items.filter((i) => i.str && i.str.trim());
-  state.textItems.set(idx, items);
+  s.textItems.set(idx, items);
   return items;
 }
 
-let searchToken = 0;
+async function runSearch(s, query) {
+  if (!s || s.closed) return;
+  const token = (s.searchToken += 1);
+  s.searchHits = [];
+  s.searchActive = 0;
+  s.searchQuery = String(query || '');
 
-async function runSearch(query) {
-  const token = ++searchToken;
-  state.searchHits = [];
-  state.searchActive = 0;
-
-  const needle = String(query || '').trim().toLowerCase();
-  if (!needle || !hasDoc()) {
-    el['search-count'].textContent = '';
-    for (const idx of state.pageOrder) paintSearch(idx);
+  const needle = s.searchQuery.trim().toLowerCase();
+  if (!needle || !hasDoc(s)) {
+    if (s === state) {
+      el['search-count'].textContent = '';
+      for (const idx of s.pageOrder) paintSearch(s, idx);
+    }
     return;
   }
 
-  for (const idx of state.pageOrder) {
-    const items = await getTextItems(idx);
-    if (token !== searchToken) return;
+  for (const idx of s.pageOrder) {
+    const items = await getTextItems(s, idx);
+    if (s.closed || token !== s.searchToken) return;
     for (const item of items) {
-      if (item.str.toLowerCase().includes(needle)) state.searchHits.push({ page: idx, item });
+      if (item.str.toLowerCase().includes(needle)) s.searchHits.push({ page: idx, item });
     }
   }
 
-  el['search-count'].textContent = String(state.searchHits.length);
-  for (const idx of state.pageOrder) paintSearch(idx);
-  if (state.searchHits.length) gotoHit(0);
+  if (s !== state) return;
+  el['search-count'].textContent = String(s.searchHits.length);
+  for (const idx of s.pageOrder) paintSearch(s, idx);
+  if (s.searchHits.length) gotoHit(s, 0);
   else setMsg('No matches');
 }
 
-function gotoHit(i) {
-  if (!state.searchHits.length) return;
-  state.searchActive = (i + state.searchHits.length) % state.searchHits.length;
-  const hit = state.searchHits[state.searchActive];
-  const pos = state.pageOrder.indexOf(hit.page);
-  if (pos >= 0) scrollToPage(pos);
-  for (const idx of state.pageOrder) paintSearch(idx);
-  el['search-count'].textContent = `${state.searchActive + 1}/${state.searchHits.length}`;
+function gotoHit(s, i) {
+  if (!s || s !== state || !s.searchHits.length) return;
+  s.searchActive = (i + s.searchHits.length) % s.searchHits.length;
+  const hit = s.searchHits[s.searchActive];
+  const pos = s.pageOrder.indexOf(hit.page);
+  if (pos >= 0) scrollToPage(s, pos);
+  for (const idx of s.pageOrder) paintSearch(s, idx);
+  el['search-count'].textContent = `${s.searchActive + 1}/${s.searchHits.length}`;
 }
 
 /* ------------------------------------------------------------- navigation */
 
-function scrollToPage(pos) {
+function scrollToPage(s, pos) {
+  if (s !== state) return;
   const target = el.pages.children[pos];
   if (target) target.scrollIntoView({ block: 'start', behavior: 'auto' });
 }
 
-function updateCurrentPage() {
-  if (!hasDoc()) return;
+function updateCurrentPage(s) {
+  if (!s || s !== state || !hasDoc(s)) return;
   const viewerTop = el.viewer.getBoundingClientRect().top;
   let best = 0;
   let bestDist = Infinity;
@@ -980,30 +1641,31 @@ function updateCurrentPage() {
       best = pos;
     }
   }
-  state.current = best;
+  s.current = best;
   el['page-input'].value = String(best + 1);
-  for (const [idx, thumb] of state.thumbEls) {
-    thumb.classList.toggle('is-current', state.pageOrder[best] === idx);
+  for (const [idx, thumb] of s.thumbEls) {
+    thumb.classList.toggle('is-current', s.pageOrder[best] === idx);
   }
 }
 
-async function setScale(next) {
-  if (!hasDoc()) return;
-  state.scale = clamp(next, MIN_SCALE, MAX_SCALE);
-  el['zoom-label'].textContent = `${Math.round(state.scale * 100)}%`;
-  for (const idx of state.pageOrder) {
-    const entry = state.pageEls.get(idx);
+async function setScale(s, next) {
+  if (!hasDoc(s) || s !== state) return;
+  s.scale = clamp(next, MIN_SCALE, MAX_SCALE);
+  el['zoom-label'].textContent = `${Math.round(s.scale * 100)}%`;
+  for (const idx of s.pageOrder) {
+    const entry = s.pageEls.get(idx);
     if (!entry) continue;
     entry.rendered = '';
-    const vp = await getViewport(idx);
+    const vp = await getViewport(s, idx);
+    if (s !== state) return;
     entry.div.style.width = `${Math.floor(vp.width)}px`;
     entry.div.style.height = `${Math.floor(vp.height)}px`;
     entry.vp = vp;
-    await layoutPage(idx);
+    await layoutPage(s, idx);
   }
-  for (const idx of state.pageOrder) {
-    const entry = state.pageEls.get(idx);
-    if (entry && isVisible(entry.div)) renderPage(idx).catch(() => {});
+  for (const idx of s.pageOrder) {
+    const entry = s.pageEls.get(idx);
+    if (entry && isVisible(entry.div)) renderPage(s, idx).catch(() => {});
   }
 }
 
@@ -1013,70 +1675,95 @@ function isVisible(node) {
   return box.bottom > view.top - 300 && box.top < view.bottom + 300;
 }
 
-async function fitWidth() {
-  if (!hasDoc()) return;
-  const vp = await getViewport(state.pageOrder[state.current], 1);
+async function fitWidth(s) {
+  if (!hasDoc(s) || s !== state) return;
+  const vp = await getViewport(s, s.pageOrder[s.current], 1);
   const available = el.viewer.clientWidth - 56;
-  await setScale(available / Math.max(vp.width, 1));
+  await setScale(s, available / Math.max(vp.width, 1));
 }
 
 /* --------------------------------------------------------------- commands */
 
-function setTool(tool) {
-  state.tool = tool;
+function setTool(next) {
+  tool = next;
   for (const button of document.querySelectorAll('#tool-group .tool')) {
-    button.classList.toggle('is-active', button.dataset.tool === tool);
+    button.classList.toggle('is-active', button.dataset.tool === next);
   }
-  for (const idx of state.pageOrder) layoutPage(idx);
-  setMsg(tool === 'select' ? '' : `${tool} tool — drag on a page`);
+  if (hasDoc(state)) {
+    for (const idx of state.pageOrder) layoutPage(state, idx);
+  }
+  setMsg(next === 'select' ? '' : `${next} tool — drag on a page`);
 }
 
-async function rotateCurrent() {
-  if (!hasDoc()) return;
-  const idx = state.pageOrder[state.current];
-  state.rotations[idx] = ((state.rotations[idx] || 0) + 90) % 360;
-  const entry = state.pageEls.get(idx);
+async function rotateCurrent(s) {
+  if (!hasDoc(s) || s !== state) return;
+  const idx = s.pageOrder[s.current];
+  s.rotations[idx] = ((s.rotations[idx] || 0) + 90) % 360;
+  const entry = s.pageEls.get(idx);
   if (entry) entry.rendered = '';
-  const thumb = state.thumbEls.get(idx);
+  const thumb = s.thumbEls.get(idx);
   if (thumb) thumb.dataset.done = '0';
-  const vp = await getViewport(idx);
+  const vp = await getViewport(s, idx);
+  if (s !== state) return;
   if (entry) {
     entry.div.style.width = `${Math.floor(vp.width)}px`;
     entry.div.style.height = `${Math.floor(vp.height)}px`;
     entry.vp = vp;
-    await renderPage(idx);
+    await renderPage(s, idx);
   }
-  setDirty(true);
+  setDirty(s, true);
   setMsg('Page rotated — save to apply');
 }
 
-async function deleteCurrent() {
-  if (!hasDoc() || state.pageOrder.length <= 1) {
+async function deleteCurrent(s) {
+  if (!hasDoc(s) || s !== state) return;
+  if (s.pageOrder.length <= 1) {
     setMsg('Cannot delete the only page');
     return;
   }
-  const pos = state.current;
-  const idx = state.pageOrder[pos];
-  const entry = state.pageEls.get(idx);
-  if (entry) state.io.unobserve(entry.div);
-  state.pageOrder.splice(pos, 1);
-  state.pageEls.delete(idx);
-  const thumb = state.thumbEls.get(idx);
+  const pos = s.current;
+  const idx = s.pageOrder[pos];
+  const entry = s.pageEls.get(idx);
+  if (entry && s.io) s.io.unobserve(entry.div);
+  s.pageOrder.splice(pos, 1);
+  s.pageEls.delete(idx);
+  const thumb = s.thumbEls.get(idx);
   if (thumb) thumb.remove();
-  state.thumbEls.delete(idx);
-  el['page-total'].textContent = `/ ${state.pageOrder.length}`;
-  el['page-input'].max = String(state.pageOrder.length);
-  await buildPages();
-  state.current = Math.min(pos, state.pageOrder.length - 1);
-  scrollToPage(state.current);
-  setDirty(true);
+  s.thumbEls.delete(idx);
+  await buildPages(s);
+  if (s !== state) return;
+  s.current = Math.min(pos, s.pageOrder.length - 1);
+  el['page-total'].textContent = `/ ${s.pageOrder.length}`;
+  el['page-input'].max = String(s.pageOrder.length);
+  scrollToPage(s, s.current);
+  setDirty(s, true);
   setMsg('Page deleted — save to apply');
+}
+
+/* -------------------------------------------------------------------- open */
+
+function existingTabFor(filePath) {
+  if (!filePath) return null;
+  const key = filePath.toLowerCase();
+  return tabs.find((t) => t.filePath && t.filePath.toLowerCase() === key) || null;
+}
+
+async function openInNewTab(doc) {
+  const existing = existingTabFor(doc.path);
+  if (existing) {
+    activateTab(existing);
+    setMsg('Already open');
+    return existing;
+  }
+  const tab = newTab();
+  await openBytes(tab, doc.bytes, doc.name, doc.path);
+  return tab;
 }
 
 async function openFile() {
   const doc = await window.omnipdf.openFile();
   if (!doc) return;
-  await openBytes(doc.bytes, doc.name, doc.path);
+  await openInNewTab(doc);
 }
 
 async function openDropped(file) {
@@ -1084,67 +1771,250 @@ async function openDropped(file) {
   if (path) {
     const doc = await window.omnipdf.openPath(path);
     if (doc) {
-      await openBytes(doc.bytes, doc.name, doc.path);
+      await openInNewTab(doc);
       return;
     }
   }
   const buffer = new Uint8Array(await file.arrayBuffer());
-  await openBytes(buffer, file.name, null);
+  await openInNewTab({ path: null, name: file.name, bytes: buffer });
 }
 
-/* ------------------------------------------------------------------- init */
+/* ---------------------------------------------------------------- updates */
 
-function bind() {
-  el['btn-open'].addEventListener('click', () => openFile());
-  el['btn-save'].addEventListener('click', () => save(false));
-  el['btn-saveas'].addEventListener('click', () => save(true));
-  el['btn-ocr'].addEventListener('click', () => runOcr());
-  el['btn-sign'].addEventListener('click', () => beginSign());
-  el['btn-rotate'].addEventListener('click', () => rotateCurrent());
-  el['btn-delete-page'].addEventListener('click', () => deleteCurrent());
-  el['btn-extract'].addEventListener('click', () => extractCurrent());
+let updateStatus = null;
 
-  el['btn-prev'].addEventListener('click', () => scrollToPage(Math.max(0, state.current - 1)));
-  el['btn-next'].addEventListener('click', () =>
-    scrollToPage(Math.min(state.pageOrder.length - 1, state.current + 1))
-  );
-  el['page-input'].addEventListener('change', () => {
-    const value = clamp(Number(el['page-input'].value) || 1, 1, state.pageOrder.length || 1);
-    scrollToPage(value - 1);
+function updateUpdateButton(status) {
+  const button = el['btn-update'];
+  if (!button) return;
+  const state = status && status.state;
+  button.classList.toggle('has-update', state === 'downloaded');
+  button.classList.toggle('is-busy', state === 'checking' || state === 'downloading');
+
+  if (state === 'downloaded') {
+    button.textContent = 'Restart to update';
+    button.title = 'An update is ready; restart to install it';
+  } else if (state === 'downloading') {
+    button.textContent = `Downloading… ${status.percent ?? 0}%`;
+    button.title = 'An update is downloading in the background';
+  } else if (state === 'checking') {
+    button.textContent = 'Checking…';
+    button.title = 'Checking for updates';
+  } else {
+    button.textContent = 'Updates';
+    button.title = 'Check for updates';
+  }
+}
+
+function hideUpdateBannerSoon(message) {
+  window.setTimeout(() => {
+    if (el['update-text'].textContent === message && el['update-action'].hidden) {
+      el['update-banner'].hidden = true;
+    }
+  }, 4000);
+}
+
+function showUpdateBanner(message, actionLabel, actionKind) {
+  el['update-text'].textContent = message;
+  el['update-action'].hidden = !actionLabel;
+  el['update-action'].textContent = actionLabel || '';
+  el['update-action'].dataset.kind = actionKind || '';
+  el['update-banner'].hidden = false;
+}
+
+function renderUpdate(status) {
+  if (!status || !status.state) return;
+  updateStatus = status;
+  updateUpdateButton(status);
+  const interactive = status.interactive === true;
+
+  switch (status.state) {
+    case 'checking':
+      if (interactive) showUpdateBanner('Checking for updates…');
+      break;
+    case 'downloading': {
+      const percent = status.percent ?? 0;
+      const label = status.version ? `OmniPDF ${status.version}` : 'an update';
+      showUpdateBanner(`Downloading ${label}… ${percent}%`);
+      break;
+    }
+    case 'downloaded':
+      showUpdateBanner(
+        `OmniPDF ${status.version || ''} is ready. It installs when you quit.`,
+        'Restart now',
+        'install'
+      );
+      break;
+    case 'none': {
+      if (!interactive) break;
+      const message = `OmniPDF ${status.version || ''} is up to date.`;
+      showUpdateBanner(message);
+      hideUpdateBannerSoon(message);
+      break;
+    }
+    case 'error': {
+      if (!interactive) break;
+      const message = `Update failed: ${status.message || 'unknown error'}`;
+      showUpdateBanner(message);
+      hideUpdateBannerSoon(message);
+      break;
+    }
+    case 'unsupported':
+    case 'unconfigured': {
+      const message = status.message || 'Updates are not configured.';
+      showUpdateBanner(message);
+      hideUpdateBannerSoon(message);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+async function restartForUpdate() {
+  const dirty = tabs.filter((tab) => tab.dirty).map((tab) => tab.fileName || 'Untitled');
+  if (dirty.length) {
+    el['update-confirm-text'].textContent =
+      `These documents have unsaved changes: ${dirty.join(', ')}. ` +
+      'Restarting now discards them and installs the update.';
+    const ok = await openDialog(el['dlg-update']);
+    if (!ok) return;
+  }
+
+  allowUnload = true;
+  const result = await window.omnipdf.installUpdate();
+  if (!result || !result.installing) {
+    allowUnload = false;
+    renderUpdate(result);
+  }
+}
+
+function bindUpdates() {
+  window.omnipdf.onUpdate(renderUpdate);
+  window.omnipdf
+    .updateState()
+    .then((status) => {
+      updateStatus = status || null;
+      if (status && status.state && status.state !== 'idle') renderUpdate(status);
+      else updateUpdateButton(status);
+    })
+    .catch(() => {});
+
+  el['btn-update'].addEventListener('click', async () => {
+    const state = updateStatus && updateStatus.state;
+    if (state === 'downloaded') {
+      restartForUpdate();
+      return;
+    }
+    if (state === 'checking' || state === 'downloading') {
+      renderUpdate(updateStatus);
+      return;
+    }
+    try {
+      const status = await window.omnipdf.checkForUpdates();
+      if (status) renderUpdate(status);
+    } catch (err) {
+      showUpdateBanner(`Update check failed: ${err.message || err}`);
+    }
   });
 
-  el['btn-zoom-in'].addEventListener('click', () => setScale(state.scale * 1.2));
-  el['btn-zoom-out'].addEventListener('click', () => setScale(state.scale / 1.2));
-  el['btn-fit'].addEventListener('click', () => fitWidth());
+  el['update-action'].addEventListener('click', () => {
+    if (el['update-action'].dataset.kind === 'install') restartForUpdate();
+  });
+  el['update-dismiss'].addEventListener('click', () => {
+    el['update-banner'].hidden = true;
+  });
+}
+
+/* -------------------------------------------------------------------- init */
+
+function bind() {
+  setupSignaturePad();
+
+  window.addEventListener('beforeunload', (ev) => {
+    if (allowUnload) return;
+    if (tabs.some((tab) => tab.dirty)) {
+      ev.preventDefault();
+      ev.returnValue = '';
+    }
+  });
+
+  el['btn-open'].addEventListener('click', () => openFile());
+  el['btn-new-tab'].addEventListener('click', () => openFile());
+  el['btn-save'].addEventListener('click', () => save(state, false));
+  el['btn-saveas'].addEventListener('click', () => save(state, true));
+  el['btn-ocr'].addEventListener('click', () => runOcr(state));
+  el['btn-sign'].addEventListener('click', () => beginSign(state));
+  el['btn-rotate'].addEventListener('click', () => rotateCurrent(state));
+  el['btn-delete-page'].addEventListener('click', () => deleteCurrent(state));
+  el['btn-extract'].addEventListener('click', () => extractCurrent(state));
+
+  el['btn-prev'].addEventListener('click', () => {
+    if (state) scrollToPage(state, Math.max(0, state.current - 1));
+  });
+  el['btn-next'].addEventListener('click', () => {
+    if (state) scrollToPage(state, Math.min(state.pageOrder.length - 1, state.current + 1));
+  });
+  el['page-input'].addEventListener('change', () => {
+    const s = state;
+    if (!s) return;
+    const value = clamp(Number(el['page-input'].value) || 1, 1, s.pageOrder.length || 1);
+    scrollToPage(s, value - 1);
+  });
+
+  el['btn-zoom-in'].addEventListener('click', () => {
+    if (state) setScale(state, state.scale * 1.2);
+  });
+  el['btn-zoom-out'].addEventListener('click', () => {
+    if (state) setScale(state, state.scale / 1.2);
+  });
+  el['btn-fit'].addEventListener('click', () => {
+    if (state) fitWidth(state);
+  });
 
   for (const button of document.querySelectorAll('#tool-group .tool')) {
     button.addEventListener('click', () => setTool(button.dataset.tool));
   }
 
-  let searchTimer = null;
   el.search.addEventListener('input', () => {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => runSearch(el.search.value), 220);
+    const s = state;
+    if (!s) return;
+    s.searchQuery = el.search.value;
+    window.clearTimeout(s.searchTimer);
+    s.searchTimer = window.setTimeout(() => {
+      if (s === state) runSearch(s, el.search.value);
+    }, 220);
   });
   el.search.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Enter') gotoHit(state.searchActive + (ev.shiftKey ? -1 : 1));
+    if (ev.key === 'Enter' && state) {
+      gotoHit(state, state.searchActive + (ev.shiftKey ? -1 : 1));
+    }
   });
 
+  let scrollTimer = null;
   el.viewer.addEventListener('scroll', () => {
-    window.clearTimeout(bind.scrollTimer);
-    bind.scrollTimer = window.setTimeout(updateCurrentPage, 90);
+    window.clearTimeout(scrollTimer);
+    scrollTimer = window.setTimeout(() => updateCurrentPage(state), 90);
   });
 
   document.addEventListener('keydown', (ev) => {
-    if (ev.ctrlKey && ev.key.toLowerCase() === 's') {
+    if (ev.ctrlKey && !ev.altKey && ev.key.toLowerCase() === 's') {
       ev.preventDefault();
-      save(ev.shiftKey);
+      save(state, ev.shiftKey);
+      return;
     }
-    if (ev.key === 'Escape' && state.signMode) {
-      state.signMode = false;
-      document.body.classList.remove('sign-mode');
-      el['btn-sign'].classList.remove('is-active');
-      setMsg('');
+    if (ev.ctrlKey && !ev.altKey && ev.key === 'Tab') {
+      ev.preventDefault();
+      cycleTabs(ev.shiftKey ? -1 : 1);
+      return;
+    }
+    if (ev.key === 'Escape') {
+      if (state && state.signMode) {
+        state.signMode = false;
+        document.body.classList.remove('sign-mode');
+        el['btn-sign'].classList.remove('is-active');
+        for (const idx of state.pageOrder) layoutPage(state, idx);
+        setMsg('');
+      }
     }
   });
 
@@ -1156,24 +2026,58 @@ function bind() {
   window.addEventListener('drop', (ev) => {
     ev.preventDefault();
     document.body.classList.remove('is-dragging');
-    const file = ev.dataTransfer?.files?.[0];
-    if (file) openDropped(file).catch((err) => setMsg(String(err.message || err)));
+    const files = Array.from(ev.dataTransfer?.files || []).filter(
+      (file) => /\.pdf$/i.test(file.name) || file.type === 'application/pdf'
+    );
+    if (!files.length) {
+      setMsg('Only PDF files can be opened');
+      return;
+    }
+    (async () => {
+      for (const file of files) {
+        try {
+          await openDropped(file);
+        } catch (err) {
+          setMsg(String(err.message || err));
+        }
+      }
+    })();
   });
 
   window.omnipdf.onMenu((action) => {
-    if (action === 'open') openFile();
-    else if (action === 'save') save(false);
-    else if (action === 'saveAs') save(true);
-    else if (action === 'extract') extractCurrent();
-    else if (action === 'ocr') runOcr();
-    else if (action === 'sign') beginSign();
-    else if (action === 'rotate') rotateCurrent();
-    else if (action === 'zoomIn') setScale(state.scale * 1.2);
-    else if (action === 'zoomOut') setScale(state.scale / 1.2);
-    else if (action === 'fit') fitWidth();
-    else if (action === 'focusSearch') el.search.focus();
+    if (action === 'open' || action === 'newTab') openFile();
+    else if (action === 'closeTab') closeTab(state);
+    else if (action === 'nextTab') cycleTabs(1);
+    else if (action === 'prevTab') cycleTabs(-1);
+    else if (action === 'save') save(state, false);
+    else if (action === 'saveAs') save(state, true);
+    else if (action === 'extract') extractCurrent(state);
+    else if (action === 'ocr') runOcr(state);
+    else if (action === 'sign') beginSign(state);
+    else if (action === 'rotate') rotateCurrent(state);
+    else if (action === 'zoomIn') {
+      if (state) setScale(state, state.scale * 1.2);
+    } else if (action === 'zoomOut') {
+      if (state) setScale(state, state.scale / 1.2);
+    } else if (action === 'fit') {
+      if (state) fitWidth(state);
+    } else if (action === 'focusSearch') el.search.focus();
     else if (action === 'cert') showCert();
   });
+
+  // Windows hands us the file on the command line (Open with / double-click).
+  window.omnipdf.onOpenPaths(async (paths) => {
+    for (const filePath of paths) {
+      try {
+        const doc = await window.omnipdf.openPath(filePath);
+        if (doc) await openInNewTab(doc);
+      } catch (err) {
+        setMsg(String(err.message || err));
+      }
+    }
+  });
+
+  bindUpdates();
 }
 
 async function showCert() {
@@ -1201,17 +2105,64 @@ window.__smoke = async (base64) => {
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-    await openBytes(bytes, 'fixture.pdf', null);
-    const idx = state.pageOrder[0];
-    await renderPage(idx);
-    const items = await getTextItems(idx);
-    const entry = state.pageEls.get(idx);
-    const page0 = await state.pdf.getPage(1);
+
+    const first = newTab();
+    await openBytes(first, bytes, 'fixture.pdf', null);
+    const idx = first.pageOrder[0];
+    await renderPage(first, idx);
+    const items = await getTextItems(first, idx);
+    const entry = first.pageEls.get(idx);
+    const page0 = await first.pdf.getPage(1);
     const anns = await page0.getAnnotations({ intent: 'display' });
+
+    // A second document must not disturb the first, and switching back has to
+    // rebuild the first tab's pages from that tab's own state.
+    const second = newTab();
+    await openBytes(second, bytes, 'fixture-second.pdf', null);
+    const twoTabsOpen = tabs.length;
+    const secondLabel = second.ui ? second.ui.label.textContent : '';
+
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const press = (key, shift) =>
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key,
+          ctrlKey: true,
+          shiftKey: Boolean(shift),
+          bubbles: true,
+        })
+      );
+
+    // Keyboard path: Ctrl+Tab cycles tabs, Ctrl+W closes only the active one.
+    press('Tab');
+    await wait(250);
+    const cycledToFirst = state === first;
+    for (let i = 0; i < 40 && first.pageEls.size < first.pageOrder.length; i += 1) await wait(100);
+    const restoredPages = first.pageEls.size;
+
+    press('Tab');
+    await wait(250);
+    const cycledToSecond = state === second;
+
+    await closeTab(second);
+    await wait(700);
+    const tabsAfterClose = tabs.length;
+    const stillFirst = state === first;
+    const title = document.title;
+
+    const tabCheck =
+      twoTabsOpen === 2 &&
+      secondLabel === 'fixture-second.pdf' &&
+      cycledToFirst &&
+      restoredPages === first.pageOrder.length &&
+      cycledToSecond &&
+      tabsAfterClose === 1 &&
+      stillFirst;
+
     return {
       build: BUILD_TAG,
-      ok: items.length > 0,
-      pages: state.pdf.numPages,
+      ok: items.length > 0 && tabCheck,
+      pages: first.pdf.numPages,
       textItems: items.length,
       sample: items.map((i) => i.str).join(' ').slice(0, 100),
       widgets: entry ? entry.widgets.length : 0,
@@ -1219,23 +2170,22 @@ window.__smoke = async (base64) => {
       widgetDiag: entry ? entry.widgetDiag : null,
       annotations: anns.map((a) => a.subtype + ':' + (a.fieldName || '-')).slice(0, 6),
       canvasWidth: entry ? entry.div.querySelector('.page-canvas').width : 0,
+      tabs: {
+        twoTabsOpen,
+        secondLabel,
+        cycledToFirst,
+        restoredPages,
+        cycledToSecond,
+        tabsAfterClose,
+        stillFirst,
+        title,
+        tabCheck,
+      },
     };
   } catch (error) {
     return { ok: false, error: String((error && error.stack) || error) };
   }
 };
 
-state.io = new IntersectionObserver(
-  (entries) => {
-    for (const entry of entries) {
-      if (!entry.isIntersecting) continue;
-      const idx = Number(entry.target.dataset.idx);
-      renderPage(idx).catch(() => {});
-    }
-  },
-  { root: el.viewer, rootMargin: '700px 0px' }
-);
-
 bind();
-updateTitle();
-updateCurrentPage();
+syncChrome(null);

@@ -26,7 +26,7 @@ body {
 
 body {
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto auto 1fr auto;
 }
 
 button,
@@ -131,6 +131,97 @@ button:disabled {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 5px 9px;
+}
+
+/* ---------------------------------------------------------------- tab bar */
+
+#tabbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+#tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  min-width: 0;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 120px;
+  max-width: 220px;
+  padding: 5px 6px 5px 11px;
+  border: 1px solid var(--line);
+  border-bottom: 0;
+  border-radius: 7px 7px 0 0;
+  background: var(--panel-2);
+  color: var(--muted);
+  cursor: default;
+  user-select: none;
+}
+
+.tab:hover {
+  background: #2b313a;
+}
+
+.tab.is-active {
+  background: #101215;
+  color: var(--text);
+  border-color: #35507f;
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.tab-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.tab-dot {
+  flex: none;
+  color: var(--accent);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.tab-close {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.6;
+}
+
+.tab-close:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+#btn-new-tab {
+  flex: none;
+  margin-bottom: 3px;
+  padding: 1px 9px 3px;
+  font-size: 15px;
+  line-height: 1.1;
+  border-radius: 6px;
 }
 
 /* ----------------------------------------------------------------- layout */
@@ -402,6 +493,148 @@ dialog menu {
   font-size: 12px;
 }
 
+#dlg-sign {
+  width: min(600px, 94vw);
+  max-width: 600px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.sig-pad-wrap {
+  position: relative;
+  margin: 8px 0 6px;
+}
+
+#sign-pad {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #fff;
+  border: 1px solid #c8d2e0;
+  border-radius: 6px;
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+}
+
+#sign-pad-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 20px;
+  color: #7b8494;
+  font-size: 12px;
+  text-align: center;
+  pointer-events: none;
+}
+
+#sign-pad-hint[hidden] {
+  display: none;
+}
+
+.sig-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.sig-actions button {
+  padding: 3px 9px;
+}
+
+#sign-file {
+  display: none;
+}
+
+.sign-status {
+  min-height: 16px;
+  margin: 4px 0 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.sig-saved-head {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.sig-saved-note {
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.sig-saved-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 20px;
+  margin: 5px 0 4px;
+}
+
+.sig-saved-empty {
+  color: var(--muted);
+  font-size: 11px;
+  padding: 4px 0;
+}
+
+.sig-saved-wrap {
+  position: relative;
+}
+
+.sig-saved-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 104px;
+  height: 44px;
+  padding: 3px;
+  background: #fff;
+  border: 1px solid #3a4350;
+  border-radius: 5px;
+}
+
+.sig-saved-item:hover {
+  background: #f3f6fb;
+}
+
+.sig-saved-item.is-selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.sig-saved-item img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.sig-saved-delete {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 50%;
+  background: #3b2227;
+  border-color: #7a3b43;
+  color: #ffd9dd;
+  font-size: 12px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.sig-saved-delete:hover {
+  background: #5a2831;
+}
+
 #cert-body {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -438,4 +671,58 @@ body.is-dragging #viewer::after {
 
 body.sign-mode .anno-layer {
   cursor: crosshair;
+}
+
+/* ---------------------------------------------------------------- updates */
+
+#update-banner {
+  position: fixed;
+  right: 14px;
+  bottom: 34px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(560px, calc(100vw - 28px));
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--accent-dim);
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  font-size: 12px;
+}
+
+#update-banner[hidden] {
+  display: none;
+}
+
+#update-banner #update-text {
+  flex: 1;
+}
+
+#update-banner button {
+  padding: 3px 9px;
+}
+
+#update-banner #update-dismiss {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+
+#update-banner #update-dismiss:hover {
+  color: var(--text);
+}
+
+#btn-update.has-update {
+  background: var(--accent-dim);
+  border-color: #3a63a8;
+  color: #eaf1ff;
+}
+
+#btn-update.is-busy {
+  color: var(--muted);
 }

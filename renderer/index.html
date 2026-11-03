@@ -55,7 +55,16 @@
         <input id="search" type="search" placeholder="Search document…" aria-label="Search document" />
         <span id="search-count"></span>
       </div>
+
+      <div class="group">
+        <button id="btn-update" title="Check for updates">Updates</button>
+      </div>
     </header>
+
+    <nav id="tabbar" aria-label="Open documents">
+      <div id="tabs" role="tablist"></div>
+      <button id="btn-new-tab" title="Open a PDF in a new tab (Ctrl+T)">+</button>
+    </nav>
 
     <main>
       <aside id="sidebar"><div id="thumbs"></div></aside>
@@ -64,10 +73,16 @@
         <div id="empty-state">
           <h1>OmniPDF</h1>
           <p>Open a PDF, or drop one anywhere in this window.</p>
-          <p class="hint">View · annotate · fill forms · sign · OCR</p>
+          <p class="hint">Each PDF opens in its own tab · annotate · fill forms · sign · OCR</p>
         </div>
       </section>
     </main>
+
+    <div id="update-banner" hidden role="status" aria-live="polite">
+      <span id="update-text"></span>
+      <button id="update-action" class="primary" hidden></button>
+      <button id="update-dismiss" title="Dismiss" aria-label="Dismiss update notice">×</button>
+    </div>
 
     <footer id="statusbar">
       <span id="status-file">No document</span>
@@ -78,10 +93,25 @@
       <form method="dialog">
         <h2>Sign document</h2>
         <p class="muted">
-          The signature is applied with your local self-signed identity. It is tamper-evident, but
-          identity assurance requires the verifier to trust that certificate.
+          Draw with a mouse, pen, or touch—or import a signature image. The visible signature is
+          embedded in the PDF; the digital signature still uses your local self-signed identity.
         </p>
         <label>Name <input id="sign-name" type="text" value="OmniPDF User" /></label>
+        <div class="sig-pad-wrap">
+          <canvas id="sign-pad" width="700" height="200" aria-label="Signature drawing area"></canvas>
+          <span id="sign-pad-hint">Draw your signature here, or import an image</span>
+        </div>
+        <div class="sig-actions">
+          <button type="button" id="sign-clear">Clear</button>
+          <button type="button" id="sign-import">Import image…</button>
+          <button type="button" id="sign-save">Save signature</button>
+          <input id="sign-file" type="file" accept="image/png,image/jpeg" hidden />
+        </div>
+        <p id="sign-status" class="sign-status" role="status"></p>
+        <div class="sig-saved-head">
+          Saved signatures <span class="sig-saved-note">(stored locally)</span>
+        </div>
+        <div id="sign-saved-list" class="sig-saved-list"></div>
         <label>Reason <input id="sign-reason" type="text" value="Approved" /></label>
         <label>Location <input id="sign-location" type="text" placeholder="Optional" /></label>
         <menu>
@@ -143,6 +173,42 @@
         <h2>Signing identity</h2>
         <dl id="cert-body"></dl>
         <menu><button value="ok" class="primary">Close</button></menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-update">
+      <form method="dialog">
+        <h2>Restart to update</h2>
+        <p class="muted" id="update-confirm-text"></p>
+        <menu>
+          <button value="cancel" class="primary">Cancel</button>
+          <button value="ok">Discard and restart</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-confirm">
+      <form method="dialog">
+        <h2>Close tab</h2>
+        <p class="muted" id="confirm-text"></p>
+        <menu>
+          <button value="cancel" class="primary">Cancel</button>
+          <button value="ok">Discard changes</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-signedit">
+      <form method="dialog">
+        <h2>Signed PDF</h2>
+        <p class="muted">
+          This PDF already has a digital signature. Saving changes made after signing will remove
+          that signature. Save a modified copy without it?
+        </p>
+        <menu>
+          <button value="cancel" class="primary">Cancel</button>
+          <button value="ok">Save without signature</button>
+        </menu>
       </form>
     </dialog>
 

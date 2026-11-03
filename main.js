@@ -8,9 +8,16 @@ const fs = require('node:fs');
 const { saveWithEdits, extractPages } = require('./src/core/edit');
 const { ensureSigner, signPdf } = require('./src/core/sign');
 const ocr = require('./src/core/ocr');
+const signatures = require('./src/main/signatures');
+const updater = require('./src/main/updater');
 
 const SMOKE = process.argv.includes('--smoke');
 const APP_URL = 'app://bundle/index.html';
+
+if (process.argv.includes('--update-version')) {
+  process.stdout.write('OMNIPDF_VERSION ' + app.getVersion());
+  app.exit(0);
+}
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -26,6 +33,13 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 if (process.platform === 'win32') app.setAppUserModelId('tools.omnipdf.editor');
+
+// Dev runs and the installed app must not fight over the singleton lock or
+// share profile data: their userData paths differ only by letter case on
+// Windows, which resolves to the same directory.
+if (!app.isPackaged) {
+  app.setPath('userData', path.join(app.getPath('appData'), 'omnipdf-dev'));
+}
 
 // The renderer is served from a custom protocol that changes on every edit;
 // the HTTP cache has no business retaining it.
@@ -48,9 +62,37 @@ const MIME = new Map(
 );
 
 let mainWindow = null;
+let rendererReady = false;
+const pendingPaths = [];
 
 function userDir() {
   return app.getPath('userData');
+}
+
+/** File paths from a launch command line (Explorer "Open with", CLI, etc.). */
+function extractPdfPaths(argv) {
+  const found = [];
+  for (const arg of argv || []) {
+    if (typeof arg !== 'string' || !arg.toLowerCase().endsWith('.pdf')) continue;
+    try {
+      if (fs.existsSync(arg) && fs.statSync(arg).isFile()) found.push(path.resolve(arg));
+    } catch {
+      /* ignore unreadable arguments */
+    }
+  }
+  return found;
+}
+
+function queueOpenPaths(paths) {
+  if (SMOKE || !paths.length) return;
+  pendingPaths.push(...paths);
+  flushOpenPaths();
+}
+
+function flushOpenPaths() {
+  if (!rendererReady || !mainWindow || !pendingPaths.length) return;
+  const paths = pendingPaths.splice(0, pendingPaths.length);
+  mainWindow.webContents.send('openPaths', paths);
 }
 
 async function serve(request) {
@@ -112,6 +154,33 @@ function createWindow() {
     return { action: 'deny' };
   });
 
+  // Quitting must not silently discard documents with unsaved changes. The
+  // renderer's beforeunload handler asks for this prompt; allowing the unload
+  // here is the user's explicit confirmation.
+  mainWindow.webContents.on('will-prevent-unload', (event) => {
+    const choice = dialog.showMessageBoxSync(mainWindow, {
+      type: 'warning',
+      buttons: ['Cancel', 'Discard and quit'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      title: 'Unsaved changes',
+      message: 'Some documents have unsaved changes.',
+      detail: 'Quitting without saving will discard them. Save first if you need these changes.',
+    });
+    if (choice === 1) event.preventDefault();
+  });
+
+  rendererReady = false;
+  mainWindow.webContents.once('did-finish-load', () => {
+    rendererReady = true;
+    flushOpenPaths();
+  });
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+    rendererReady = false;
+  });
+
   mainWindow.loadURL(APP_URL);
 
   if (SMOKE) {
@@ -132,6 +201,32 @@ function createWindow() {
   }
 }
 
+function openBugReport() {
+  const title = '[Bug] ';
+  const body = [
+    '**What happened?**',
+    '',
+    '',
+    '**What did you expect?**',
+    '',
+    '',
+    '**Steps to reproduce**',
+    '1. ',
+    '2. ',
+    '',
+    '---',
+    `OmniPDF: ${app.getVersion()}`,
+    `Windows: ${process.getSystemVersion() || 'unknown'} (${process.arch})`,
+    `Electron: ${process.versions.electron}`,
+    '',
+    'Please do not attach confidential PDFs; GitHub issues are public.',
+  ].join('\n');
+  const url = `https://github.com/jfong878/OmniPDF/issues/new?${new URLSearchParams({ title, body }).toString()}`;
+  shell.openExternal(url).catch((error) => {
+    dialog.showErrorBox('Report a Bug', `Could not open GitHub: ${(error && error.message) || error}`);
+  });
+}
+
 function buildMenu() {
   const send = (action) => () => {
     const win = BrowserWindow.getFocusedWindow() || mainWindow;
@@ -142,11 +237,16 @@ function buildMenu() {
     {
       label: 'File',
       submenu: [
+        { label: 'New Tab…', accelerator: 'CmdOrCtrl+T', click: send('newTab') },
         { label: 'Open…', accelerator: 'CmdOrCtrl+O', click: send('open') },
+        { label: 'Close Tab', accelerator: 'CmdOrCtrl+W', click: send('closeTab') },
         { type: 'separator' },
         { label: 'Save', accelerator: 'CmdOrCtrl+S', click: send('save') },
         { label: 'Save As…', accelerator: 'CmdOrCtrl+Shift+S', click: send('saveAs') },
         { label: 'Extract Page…', click: send('extract') },
+        { type: 'separator' },
+        { label: 'Next Tab', accelerator: 'Ctrl+Tab', registerAccelerator: false, click: send('nextTab') },
+        { label: 'Previous Tab', accelerator: 'Ctrl+Shift+Tab', registerAccelerator: false, click: send('prevTab') },
         { type: 'separator' },
         { role: 'quit' },
       ],
@@ -186,29 +286,71 @@ function buildMenu() {
         { label: 'Signing Identity…', click: send('cert') },
       ],
     },
+    {
+      label: 'Help',
+      submenu: [
+        { label: 'Report a Bug…', click: openBugReport },
+        { type: 'separator' },
+        { label: 'Check for Updates…', click: () => updater.check({ interactive: true }) },
+        {
+          label: 'Open Update Log',
+          click: () => {
+            const logPath = path.join(userDir(), 'updates.log');
+            try { fs.appendFileSync(logPath, ''); } catch { /* ignore */ }
+            shell.openPath(logPath);
+          },
+        },
+      ],
+    },
   ];
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-app.whenReady().then(async () => {
-  protocol.handle('app', serve);
-  try {
-    // Chromium keeps compiled module code across launches; the renderer is
-    // local source and must always reflect the current files on disk.
-    await session.defaultSession.clearCache();
-    await session.defaultSession.clearCodeCaches({});
-  } catch {
-    /* best effort */
-  }
-  ocr.setCacheDir(path.join(userDir(), 'tessdata'));
-  buildMenu();
-  createWindow();
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+// "Open with OmniPDF" on a .pdf launches a second process with the file on
+// its command line. Hand the path to the running instance instead of opening
+// a duplicate window; smoke runs bypass the lock so they always execute.
+const gotLock = SMOKE || app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (_event, argv) => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+    queueOpenPaths(extractPdfPaths(argv));
   });
-});
+}
+
+if (gotLock) {
+  app.whenReady().then(async () => {
+    protocol.handle('app', serve);
+    try {
+      // Chromium keeps compiled module code across launches; the renderer is
+      // local source and must always reflect the current files on disk.
+      await session.defaultSession.clearCache();
+      await session.defaultSession.clearCodeCaches({});
+    } catch {
+      /* best effort */
+    }
+    ocr.setCacheDir(path.join(userDir(), 'tessdata'));
+    queueOpenPaths(extractPdfPaths(process.argv));
+    updater.onStatus((status) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('update:status', status);
+      }
+    });
+    updater.setup();
+    buildMenu();
+    createWindow();
+    if (process.argv.includes('--update-e2e')) updater.runE2E();
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  });
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
@@ -226,10 +368,19 @@ ipcMain.handle('app:info', () => ({
   dataDir: userDir(),
 }));
 
+ipcMain.handle('update:state', () => updater.snapshot());
+ipcMain.handle('update:check', () => updater.check({ interactive: true }));
+ipcMain.handle('update:download', () => updater.download());
+ipcMain.handle('update:install', () => updater.install());
+
 ipcMain.handle('cert:info', () => {
   const signer = ensureSigner(userDir());
   return { ...signer.info, path: path.join(userDir(), 'signer.p12') };
 });
+
+ipcMain.handle('signatures:list', () => signatures.list(userDir()));
+ipcMain.handle('signatures:save', (_event, payload) => signatures.save(userDir(), payload));
+ipcMain.handle('signatures:delete', (_event, id) => signatures.remove(userDir(), id));
 
 ipcMain.handle('file:open', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
@@ -271,6 +422,11 @@ ipcMain.handle('core:edit', async (_event, payload) => {
 ipcMain.handle('core:sign', async (_event, payload) => {
   const edited = await saveWithEdits(payload.bytes, payload);
   const signer = ensureSigner(userDir());
+  let signatureImage;
+  if (payload.signatureImage) {
+    if (typeof payload.signatureImage !== 'string') throw new Error('Invalid signature image');
+    signatureImage = Buffer.from(payload.signatureImage, 'base64');
+  }
   const signed = await signPdf(edited.bytes, {
     pageIndex: payload.pageIndex,
     rect: payload.rect,
@@ -278,6 +434,7 @@ ipcMain.handle('core:sign', async (_event, payload) => {
     reason: payload.reason,
     location: payload.location,
     contactInfo: payload.contactInfo,
+    signatureImage,
     signer,
   });
   return { bytes: signed, errors: edited.errors };

@@ -1,6 +1,6 @@
 {
   "name": "omnipdf",
-  "version": "1.0.0",
+  "version": "1.0.5",
   "private": true,
   "description": "OmniPDF - local PDF viewer, editor, form signer and OCR",
   "main": "main.js",
@@ -11,12 +11,15 @@
     "fixture": "node scripts/make-fixture.mjs",
     "selftest": "node scripts/selftest.mjs",
     "smoke": "electron . --smoke",
-    "package": "electron-packager . OmniPDF --platform=win32 --arch=x64 --out=dist --overwrite --asar --icon=assets/icon.ico --ignore=\"^/(dist|scripts|\\.tessdata)\""
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --win nsis --x64 --publish never",
+    "package": "electron-builder --win nsis --x64 --publish never"
   },
   "dependencies": {
     "@signpdf/placeholder-pdf-lib": "^4.0.0",
     "@signpdf/signer-p12": "^4.0.0",
     "@signpdf/signpdf": "^4.0.0",
+    "electron-updater": "^6.8.11",
     "node-forge": "^1.4.2",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^6.5.438",
@@ -24,6 +27,68 @@
   },
   "devDependencies": {
     "@electron/packager": "^20.3.0",
-    "electron": "^45.2.1"
+    "electron": "^45.2.1",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "tools.omnipdf.editor",
+    "productName": "OmniPDF",
+    "copyright": "Copyright © 2026 OmniPDF",
+    "asar": true,
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "src/**/*",
+      "assets/**/*",
+      "package.json",
+      "!**/*.map"
+    ],
+    "asarUnpack": [
+      "node_modules/tesseract.js/**",
+      "node_modules/tesseract.js-core/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "artifactName": "OmniPDF-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "OmniPDF",
+      "uninstallDisplayName": "OmniPDF ${version}",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true
+    },
+    "fileAssociations": [
+      {
+        "ext": "pdf",
+        "name": "PDF Document",
+        "description": "PDF Document",
+        "role": "Viewer",
+        "icon": "assets/icon.ico"
+      }
+    ],
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://github.com/jfong878/OmniPDF/releases/latest/download/"
+      }
+    ]
   }
 }
