@@ -331,6 +331,12 @@ main {
   inset: 0;
 }
 
+/* The layer spans the whole page, so it must not swallow page clicks. Widgets
+   opt back in individually; blank areas reach the annotation/sign overlay. */
+.form-layer {
+  pointer-events: none;
+}
+
 .search-layer {
   pointer-events: none;
 }
@@ -348,6 +354,7 @@ main {
 
 .form-widget {
   position: absolute;
+  pointer-events: auto;
   background: rgba(77, 141, 255, 0.1);
   border: 1px solid rgba(77, 141, 255, 0.65);
   border-radius: 2px;

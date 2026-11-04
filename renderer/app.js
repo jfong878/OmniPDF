@@ -11,7 +11,7 @@ const MAX_SCALE = 5;
 const DEFAULT_SCALE = 1.15;
 const DPR = Math.min(window.devicePixelRatio || 1, 2);
 const MAX_CANVAS_PIXELS = 8_000_000;
-const BUILD_TAG = 'build-6';
+const BUILD_TAG = 'build-7';
 
 const IDS = [
   'btn-open', 'btn-save', 'btn-saveas', 'btn-prev', 'btn-next', 'page-input', 'page-total',
