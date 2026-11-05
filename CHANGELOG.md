@@ -3,6 +3,35 @@
 All notable changes to OmniPDF are recorded here. Releases follow Semantic
 Versioning.
 
+## [Unreleased]
+
+### Added
+
+- Movable signature placement: choose Sign, click a page, drag the dashed box,
+  then confirm or cancel.
+- Per-tab document history with toolbar back/forward arrows. Snapshots cover
+  form edits, annotations, rotation/deletion, OCR, signing and saves.
+- Printing from the current document state (Ctrl+P), with pending edits
+  flattened and pages rendered for the system print dialog.
+- Ten-item recent-files list on the start screen and under File > Open Recent.
+- Fit page and actual-size zoom controls, plus Ctrl+2 and Ctrl+1 shortcuts.
+- Find-result stepping with toolbar arrows, F3/Shift+F3, and Escape to clear.
+- Page navigation shortcuts: Ctrl+G, PageUp/PageDown, Ctrl+Home/End.
+- Document properties dialog (Ctrl+D) with metadata, page size and file size.
+
+### Fixed
+
+- Late change events from detached form widgets could overwrite restored state
+  and truncate the redo branch; detached inputs are now ignored.
+
+### Verified
+
+- `npm run selftest` covers core editing, signing, OCR and recent-file storage.
+- `npm run smoke` verifies find navigation, metadata, recent-list rendering and
+  print-page preparation (3 fixture pages rendered at 1275px wide).
+- A live-renderer CDP pass verifies fit page, fit width, actual size and zoom-in,
+  find next/previous and F3, Escape clearing, and keyboard page navigation.
+
 ## [1.0.7] - 2026-11-04
 
 ### Fixed

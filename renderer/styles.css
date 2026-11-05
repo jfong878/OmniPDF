@@ -106,6 +106,14 @@ button:disabled {
   cursor: default;
 }
 
+#btn-undo,
+#btn-redo {
+  min-width: 30px;
+  padding: 4px 8px;
+  font-size: 15px;
+  line-height: 1.1;
+}
+
 #page-input {
   width: 54px;
   text-align: center;
@@ -131,6 +139,19 @@ button:disabled {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 5px 9px;
+}
+
+.find-step {
+  min-width: 27px;
+  padding: 3px 7px;
+  font-size: 14px;
+  line-height: 1.1;
+}
+
+#btn-fit-page,
+#btn-actual {
+  padding-left: 7px;
+  padding-right: 7px;
 }
 
 /* ---------------------------------------------------------------- tab bar */
@@ -386,11 +407,81 @@ main {
   cursor: crosshair;
 }
 
+.sign-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+}
+
 .sign-target {
   position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
   border: 2px dashed var(--accent);
+  border-radius: 5px;
   background: rgba(77, 141, 255, 0.12);
+  color: #dce9ff;
+  pointer-events: auto;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  box-shadow: 0 0 0 1px rgba(16, 19, 25, 0.25);
+}
+
+.sign-target.is-dragging {
+  cursor: grabbing;
+  background: rgba(77, 141, 255, 0.24);
+  box-shadow: 0 0 0 2px rgba(77, 141, 255, 0.35);
+}
+
+.sign-target-label {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.sign-target-hint {
+  font-size: 10px;
+  color: #a9c5f4;
+}
+
+body.placing-signature .form-layer,
+body.placing-signature .anno-layer {
   pointer-events: none;
+}
+
+#sign-place-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 34px;
+  z-index: 45;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(620px, calc(100vw - 28px));
+  padding: 9px 11px;
+  transform: translateX(-50%);
+  background: var(--panel-2);
+  border: 1px solid var(--accent-dim);
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  font-size: 12px;
+}
+
+#sign-place-bar[hidden] {
+  display: none;
+}
+
+#sign-place-bar span {
+  color: var(--muted);
+}
+
+#sign-place-bar button {
+  padding: 4px 9px;
 }
 
 /* -------------------------------------------------------------- empty state */
@@ -418,6 +509,74 @@ main {
 #empty-state .hint {
   font-size: 12px;
   opacity: 0.7;
+}
+
+#recent-files {
+  width: min(540px, calc(100vw - 70px));
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  pointer-events: auto;
+}
+
+.recent-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.recent-head button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 1px 4px;
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.recent-head button:hover {
+  color: var(--text);
+  background: transparent;
+}
+
+#recent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.recent-item {
+  display: block;
+  width: 100%;
+  padding: 6px 9px;
+  text-align: left;
+  background: var(--panel-2);
+  border-color: var(--line);
+}
+
+.recent-name,
+.recent-folder {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-name {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.recent-folder {
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: 10px;
 }
 
 body.has-document #empty-state {
@@ -659,6 +818,31 @@ dialog menu {
   overflow-wrap: anywhere;
 }
 
+#props-body {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 14px;
+  margin: 0;
+  font-size: 12px;
+}
+
+#props-body dt {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+#props-body dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.props-path {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
 /* ------------------------------------------------------------------- misc */
 
 body.is-dragging #viewer::after {
@@ -678,6 +862,60 @@ body.is-dragging #viewer::after {
 
 body.sign-mode .anno-layer {
   cursor: crosshair;
+}
+
+/* ------------------------------------------------------------------ print */
+
+#print-root {
+  display: none;
+}
+
+@page {
+  size: auto;
+  margin: 0;
+}
+
+@media print {
+  html,
+  body {
+    display: block;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    background: #fff;
+    color: #000;
+  }
+
+  body > *:not(#print-root) {
+    display: none !important;
+  }
+
+  #print-root {
+    display: block !important;
+  }
+
+  #print-root .print-page {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100vh;
+    overflow: hidden;
+    page-break-after: always;
+    break-after: page;
+  }
+
+  #print-root .print-page:last-child {
+    page-break-after: auto;
+    break-after: auto;
+  }
+
+  #print-root .print-page img {
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+  }
 }
 
 /* ---------------------------------------------------------------- updates */

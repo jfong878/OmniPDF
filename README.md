@@ -1,6 +1,6 @@
 # OmniPDF
 
-A local Windows PDF workspace: view, annotate, fill forms, sign, and OCR.
+A local Windows PDF workspace: view, annotate, fill forms, sign, print, and OCR.
 Open several documents at once — each PDF gets its own tab.
 
 Built on [pdf.js](https://mozilla.github.io/pdf.js/) for rendering and
@@ -23,12 +23,13 @@ npm start
 ## Verify
 
 ```bash
-npm run selftest   # core checks: forms, annotations, rotation, delete, extract, signing, signatures, OCR
-npm run smoke      # Electron: renders a page, extracts text, builds widgets, switches tabs
+npm run selftest   # core checks: forms, annotations, rotation, delete, extract, signing, signatures, OCR, recents
+npm run smoke      # Electron: rendering, text, widgets, tabs, find, metadata, print layout
 ```
 
 `selftest` runs against `assets/fixture.pdf` and is pure Node — no display needed.
-`smoke` exits non-zero if the renderer fails to load or produce text.
+`smoke` exits non-zero if the renderer fails to load, produce text, or exercise the
+new renderer paths.
 
 ## Auto-updates
 
@@ -99,6 +100,7 @@ skipped rather than failed.
 main.js               Electron main: app:// protocol, window, menu, IPC
 preload.js            contextBridge surface (no Node in the renderer)
 src/main/updater.js   update feed, background download, install-on-quit
+src/main/recent.js    recently opened PDFs (persisted locally)
 src/main/signatures.js saved drawn/imported signature images
 src/core/edit.js      form filling, annotation flattening, rotate/delete, extract
 src/core/sign.js      local signing identity + PKCS#7 signing
@@ -121,6 +123,9 @@ and rebuilds it from that tab's state, so only the active tab holds live
 elements. Opening the same path twice focuses the existing tab instead of
 duplicating it; closing a dirty tab asks before discarding. Ctrl+T / Ctrl+O open
 a file in a new tab, Ctrl+W closes one, Ctrl+Tab and Ctrl+Shift+Tab cycle.
+Ctrl+P prints, Ctrl+D shows document properties, and Ctrl+G focuses the page
+box. PageUp/PageDown step pages, while Ctrl+Home/End jump to the first or last
+page. F3 and Shift+F3 move through find results.
 
 **Serving.** The renderer is served over a custom `app://bundle` scheme rather
 than `file://`, so ES modules and module workers load normally. `/vendor/*` maps
@@ -143,9 +148,27 @@ modified copy without the prior signature.
 `%APPDATA%\OmniPDF\signer.p12`. The signature is a detached PKCS#7 over the
 document byte range (placeholder via `@signpdf/placeholder-pdf-lib`, applied by
 `@signpdf/signpdf`). The visible signature can be drawn with a mouse, pen, or
-touch, or imported as PNG/JPEG. Saved signatures live under
-`%APPDATA%\OmniPDF\signatures` and are embedded as an appearance; they do not
-change the signing identity.
+touch, or imported as PNG/JPEG. After choosing Sign, click the page once to
+place the dashed signature box, drag it to the exact position, then choose
+**Sign document**. Saved signatures live under `%APPDATA%\OmniPDF\signatures`
+and are embedded as an appearance; they do not change the signing identity.
+
+**History.** Each tab keeps up to 40 document snapshots. The toolbar arrows
+walk backward and forward through form edits, annotations, page rotation and
+deletion, OCR, signing, and saves. Snapshots include the PDF bytes for
+operations that rewrite the document, so going back after signing or OCR
+restores the earlier PDF rather than only its visible annotations.
+
+**Printing.** Print uses the current document state, including pending form
+values, annotations, rotations and deletions. Those edits are flattened into a
+temporary PDF, each page is rendered at 150 DPI, and the result is handed to
+Chromium's system print dialog. Printing never saves or changes the open file.
+
+**Recent files and properties.** The ten most recently opened or saved PDFs are
+stored in `recent.json` under the app data directory and shown on the start
+screen and under File > Open Recent. Missing files are pruned automatically.
+File > Properties (Ctrl+D) shows metadata, PDF version, page size, file size and
+location. Find results can be stepped with the toolbar arrows or F3/Shift+F3.
 
 **OCR.** Pages are rasterised at 200 DPI, recognised by tesseract, then replaced
 with the image plus an invisible, word-positioned text layer.
@@ -163,7 +186,9 @@ with the image plus an invisible, word-positioned text layer.
   page-tree mutation silently corrupted ordering, so the feature was removed
   rather than shipped broken.
 - **No XFA.** Deprecated in PDF 2.0 and proprietary; AcroForm only.
-- **No printing, no text editing, no PDF/A validation.**
+- **No text editing or PDF/A validation.**
+- **Printing rasterises.** Printed pages go through the system print dialog at
+  150 DPI; very large documents take longer to prepare and use more memory.
 - **Windows only**, due to the packaging and install scripts.
 - **Auto-updates are unsigned until a certificate is configured.** SmartScreen
   warns on first install; set `CSC_LINK` before distributing.

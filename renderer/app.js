@@ -11,19 +11,27 @@ const MAX_SCALE = 5;
 const DEFAULT_SCALE = 1.15;
 const DPR = Math.min(window.devicePixelRatio || 1, 2);
 const MAX_CANVAS_PIXELS = 8_000_000;
-const BUILD_TAG = 'build-7';
+const MAX_PRINT_PIXELS = 12_000_000;
+const PRINT_DPI = 150;
+const HISTORY_LIMIT = 40;
+const BUILD_TAG = 'build-8';
 
 const IDS = [
-  'btn-open', 'btn-save', 'btn-saveas', 'btn-prev', 'btn-next', 'page-input', 'page-total',
-  'btn-zoom-out', 'btn-zoom-in', 'btn-fit', 'zoom-label', 'pages', 'viewer', 'thumbs', 'search',
-  'search-count', 'status-file', 'status-msg', 'btn-rotate', 'btn-delete-page', 'btn-extract',
+  'btn-open', 'btn-save', 'btn-saveas', 'btn-print', 'btn-undo', 'btn-redo', 'btn-prev', 'btn-next',
+  'page-input', 'page-total',
+  'btn-zoom-out', 'btn-zoom-in', 'btn-fit', 'btn-fit-page', 'btn-actual', 'zoom-label',
+  'pages', 'viewer', 'thumbs', 'search', 'search-count', 'btn-find-prev', 'btn-find-next',
+  'status-file', 'status-msg', 'btn-rotate', 'btn-delete-page', 'btn-extract',
   'btn-ocr', 'btn-sign', 'dlg-sign', 'sign-name', 'sign-reason', 'sign-location',
   'sign-pad', 'sign-pad-hint', 'sign-clear', 'sign-import', 'sign-file', 'sign-save',
-  'sign-status', 'sign-saved-list', 'dlg-ocr',
+  'sign-status', 'sign-saved-list', 'sign-place-bar', 'sign-place-confirm', 'sign-place-cancel',
+  'dlg-ocr',
   'ocr-scope', 'ocr-lang', 'dlg-text', 'text-value', 'dlg-cert', 'cert-body',
+  'dlg-props', 'props-body', 'props-path', 'props-reveal',
   'tabs', 'btn-new-tab', 'dlg-confirm', 'confirm-text', 'dlg-signedit',
   'update-banner', 'update-text', 'update-action', 'update-dismiss', 'btn-update',
-  'dlg-update', 'update-confirm-text',
+  'dlg-update', 'update-confirm-text', 'recent-files', 'recent-list', 'recent-clear',
+  'print-root',
 ];
 
 const el = {};
@@ -40,6 +48,8 @@ let tool = 'select';
 let tabSeq = 0;
 let allowUnload = false;
 let scaleTimer = null;
+let printBusy = false;
+let printUrls = [];
 
 const SIGN_PAD_W = 700;
 const SIGN_PAD_H = 200;
@@ -79,6 +89,8 @@ function createTab() {
     dirty: false,
     nextId: 1,
     signMode: false,
+    signPlacement: null,
+    history: { entries: [], index: -1, busy: false },
     drag: null,
     io: null,
     scrollTop: 0,
@@ -89,6 +101,19 @@ function createTab() {
 
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const hasDoc = (s) => Boolean(s && s.pdf);
+
+function pdfLoadOptions(bytes) {
+  return {
+    data: bytes.slice(),
+    cMapUrl: CMAP_URL,
+    cMapPacked: true,
+    standardFontDataUrl: STANDARD_FONTS,
+    wasmUrl: WASM_URL,
+    iccUrl: ICC_URL,
+    isEvalSupported: false,
+    useSystemFonts: true,
+  };
+}
 
 function setMsg(message) {
   el['status-msg'].textContent = message || '';
@@ -113,6 +138,130 @@ function setDirty(s, value) {
   s.dirty = value;
   updateTabLabel(s);
   if (s === state) updateTitle();
+}
+
+/* --------------------------------------------------------------- history */
+
+// A snapshot holds the document state, but not copies of the PDF bytes: byte
+// arrays are immutable here and snapshots reuse the same reference. Signed and
+// OCR states therefore restore the exact bytes from that point in history.
+function snapshotTab(s) {
+  return {
+    bytes: s.bytes,
+    pageOrder: s.pageOrder.slice(),
+    originalCount: s.originalCount,
+    rotations: { ...s.rotations },
+    annotations: structuredClone(s.annotations),
+    formValues: { ...s.formValues },
+    nextId: s.nextId,
+    current: s.current,
+    dirty: s.dirty,
+  };
+}
+
+function historyStateMatches(a, b) {
+  return (
+    a.bytes === b.bytes &&
+    a.originalCount === b.originalCount &&
+    a.nextId === b.nextId &&
+    JSON.stringify({
+      pageOrder: a.pageOrder,
+      rotations: a.rotations,
+      annotations: a.annotations,
+      formValues: a.formValues,
+    }) ===
+      JSON.stringify({
+        pageOrder: b.pageOrder,
+        rotations: b.rotations,
+        annotations: b.annotations,
+        formValues: b.formValues,
+      })
+  );
+}
+
+function updateHistoryButtons(s) {
+  const undo = el['btn-undo'];
+  const redo = el['btn-redo'];
+  if (!undo || !redo) return;
+  const h = s && s.history;
+  const idle = Boolean(s && s === state && h && !h.busy);
+  const canUndo = Boolean(idle && h.index > 0);
+  const canRedo = Boolean(idle && h.index >= 0 && h.index < h.entries.length - 1);
+  undo.disabled = !canUndo;
+  redo.disabled = !canRedo;
+  undo.title = canUndo
+    ? `Back — undo ${h.entries[h.index].label || 'edit'}`
+    : 'Back — no earlier PDF state';
+  redo.title = canRedo
+    ? `Forward — redo ${h.entries[h.index + 1].label || 'edit'}`
+    : 'Forward — no later PDF state';
+}
+
+function resetHistory(s) {
+  if (!s) return;
+  s.history = hasDoc(s)
+    ? { entries: [snapshotTab(s)], index: 0, busy: false }
+    : { entries: [], index: -1, busy: false };
+  updateHistoryButtons(s);
+}
+
+function syncHistoryCurrent(s) {
+  const h = s && s.history;
+  if (!h || !hasDoc(s)) {
+    resetHistory(s);
+    return;
+  }
+  if (h.index < 0 || !h.entries[h.index]) {
+    resetHistory(s);
+    return;
+  }
+  const snap = snapshotTab(s);
+  const previous = h.entries[h.index];
+  snap.label = previous.label || 'Edit';
+  snap.coalesceKey = previous.coalesceKey || null;
+  snap.time = Date.now();
+  h.entries[h.index] = snap;
+  updateHistoryButtons(s);
+}
+
+function pushHistory(s, options = {}) {
+  const h = s && s.history;
+  if (!h || !hasDoc(s) || s.closed || h.busy) return;
+
+  const snap = snapshotTab(s);
+  snap.label = options.label || 'Edit';
+  snap.coalesceKey = options.coalesceKey || null;
+  snap.time = Date.now();
+
+  const current = h.index >= 0 ? h.entries[h.index] : null;
+  if (current && historyStateMatches(current, snap)) {
+    current.dirty = snap.dirty;
+    current.current = snap.current;
+    updateHistoryButtons(s);
+    return;
+  }
+
+  // A new edit after going back invalidates the forward branch.
+  if (h.index < h.entries.length - 1) h.entries.splice(h.index + 1);
+
+  const last = h.index >= 0 ? h.entries[h.index] : null;
+  if (
+    options.coalesceKey &&
+    last &&
+    last.coalesceKey === options.coalesceKey &&
+    snap.time - last.time < 900
+  ) {
+    snap.label = options.label || last.label || 'Edit';
+    h.entries[h.index] = snap;
+  } else {
+    h.entries.push(snap);
+    h.index = h.entries.length - 1;
+    if (h.entries.length > HISTORY_LIMIT) {
+      h.entries.splice(0, h.entries.length - HISTORY_LIMIT);
+      h.index = h.entries.length - 1;
+    }
+  }
+  updateHistoryButtons(s);
 }
 
 function updateTabLabel(tab) {
@@ -191,6 +340,7 @@ function activateTab(tab) {
       prev.io.disconnect();
       prev.io = null;
     }
+    if (prev.signPlacement) clearSignPlacement(prev);
     prev.pageEls.clear();
     prev.thumbEls.clear();
     prev.drag = null;
@@ -208,6 +358,7 @@ function activateTab(tab) {
   el.thumbs.innerHTML = '';
   el.viewer.scrollTop = 0;
   syncChrome(tab);
+  syncSignPlacementBar(tab);
 
   if (tab.pdf) {
     return buildPages(tab)
@@ -244,6 +395,7 @@ async function closeTab(tab) {
   const wasActive = target === state;
 
   target.closed = true;
+  if (target.signPlacement) clearSignPlacement(target);
   tabs.splice(pos, 1);
   if (target.ui) {
     target.ui.root.remove();
@@ -275,6 +427,7 @@ async function closeTab(tab) {
   } else {
     syncChrome(null);
     setMsg('');
+    refreshRecentFiles();
   }
 }
 
@@ -294,6 +447,8 @@ function syncChrome(s) {
     el['zoom-label'].textContent = '100%';
     el['search-count'].textContent = '';
     el.search.value = '';
+    syncFindButtons(null);
+    updateHistoryButtons(null);
     updateTitle();
     return;
   }
@@ -307,6 +462,8 @@ function syncChrome(s) {
       : '0'
     : '';
   el.search.value = s.searchQuery || '';
+  syncFindButtons(s);
+  updateHistoryButtons(s);
   updateTitle();
 }
 
@@ -320,20 +477,12 @@ async function getViewport(s, idx, scale = s.scale) {
 
 /* ------------------------------------------------------------ open/reload */
 
-async function openBytes(s, bytes, name, filePath) {
+async function openBytes(s, bytes, name, filePath, options = {}) {
   if (!s || s.closed) return;
+  const { history = 'reset', dirty = false, build = true } = options;
   setMsgFor(s, 'Loading…');
 
-  const doc = await pdfjsLib.getDocument({
-    data: bytes.slice(),
-    cMapUrl: CMAP_URL,
-    cMapPacked: true,
-    standardFontDataUrl: STANDARD_FONTS,
-    wasmUrl: WASM_URL,
-    iccUrl: ICC_URL,
-    isEvalSupported: false,
-    useSystemFonts: true,
-  }).promise;
+  const doc = await pdfjsLib.getDocument(pdfLoadOptions(bytes)).promise;
 
   if (s.closed) {
     try {
@@ -368,6 +517,7 @@ async function openBytes(s, bytes, name, filePath) {
   s.current = 0;
   s.nextId = 1;
   s.signMode = false;
+  s.signPlacement = null;
   s.drag = null;
   s.scrollTop = 0;
   s.pageEls.clear();
@@ -376,14 +526,97 @@ async function openBytes(s, bytes, name, filePath) {
   updateTabLabel(s);
 
   if (s === state) {
+    document.body.classList.remove('sign-mode', 'placing-signature');
+    el['btn-sign'].classList.remove('is-active');
+    el['sign-place-bar'].hidden = true;
     syncChrome(s);
-    await buildPages(s);
-    if (s === state) {
-      setMsg(`${doc.numPages} page${doc.numPages === 1 ? '' : 's'}`);
+    if (build) {
+      await buildPages(s);
+      if (s === state) {
+        setMsg(`${doc.numPages} page${doc.numPages === 1 ? '' : 's'}`);
+      }
     }
   }
-  setDirty(s, false);
+  setDirty(s, dirty);
   updateTitle();
+  if (history === 'reset') resetHistory(s);
+  else if (history === 'sync') syncHistoryCurrent(s);
+}
+
+async function restoreHistory(s, targetIndex) {
+  const h = s && s.history;
+  const snap = h && h.entries[targetIndex];
+  if (!s || s.closed || !h || h.busy || !snap) return false;
+
+  h.busy = true;
+  updateHistoryButtons(s);
+  try {
+    s.signMode = false;
+    clearSignPlacement(s);
+
+    // Only signed, OCR'd, saved or otherwise rewritten documents need a new
+    // pdf.js parse. Ordinary edits share the original byte array reference.
+    if (s.bytes !== snap.bytes) {
+      await openBytes(s, snap.bytes, s.fileName, s.filePath, {
+        history: 'none',
+        dirty: snap.dirty,
+        build: false,
+      });
+      if (s.closed) return false;
+    }
+
+    s.pageOrder = snap.pageOrder.slice();
+    s.originalCount = snap.originalCount;
+    s.rotations = { ...snap.rotations };
+    s.annotations = structuredClone(snap.annotations);
+    s.formValues = { ...snap.formValues };
+    s.nextId = snap.nextId;
+    s.current = clamp(Number(snap.current) || 0, 0, Math.max(0, s.pageOrder.length - 1));
+    s.drag = null;
+    s.searchHits = [];
+    s.searchActive = 0;
+    s.searchQuery = '';
+    s.searchToken += 1;
+    setDirty(s, snap.dirty);
+    h.index = targetIndex;
+
+    await buildPages(s);
+    if (s.closed) return false;
+    if (s === state) {
+      syncChrome(s);
+      scrollToPage(s, s.current);
+    }
+    return true;
+  } finally {
+    h.busy = false;
+    updateHistoryButtons(s);
+  }
+}
+
+async function undoDocument(s) {
+  const h = s && s.history;
+  if (!s || s !== state || !h || h.busy || h.index <= 0) return;
+  const entry = h.entries[h.index];
+  try {
+    if (await restoreHistory(s, h.index - 1)) {
+      setMsg(`Back: undid ${entry.label || 'edit'}`);
+    }
+  } catch (err) {
+    setMsg(`Could not undo: ${err.message || err}`);
+  }
+}
+
+async function redoDocument(s) {
+  const h = s && s.history;
+  if (!s || s !== state || !h || h.busy || h.index >= h.entries.length - 1) return;
+  const entry = h.entries[h.index + 1];
+  try {
+    if (await restoreHistory(s, h.index + 1)) {
+      setMsg(`Forward: redid ${entry.label || 'edit'}`);
+    }
+  } catch (err) {
+    setMsg(`Could not redo: ${err.message || err}`);
+  }
 }
 
 async function buildPages(s) {
@@ -418,7 +651,8 @@ async function buildPages(s) {
     div.style.height = `${Math.floor(vp.height)}px`;
     div.innerHTML =
       '<canvas class="page-canvas"></canvas><div class="text-layer"></div>' +
-      '<div class="search-layer"></div><canvas class="anno-layer"></canvas><div class="form-layer"></div>';
+      '<div class="search-layer"></div><canvas class="anno-layer"></canvas><div class="form-layer"></div>' +
+      '<div class="sign-layer"></div>';
 
     const overlay = div.querySelector('.anno-layer');
     overlay.addEventListener('pointerdown', (ev) => onOverlayDown(s, ev, idx));
@@ -665,11 +899,19 @@ async function buildWidgets(s, idx, page, vp) {
     }
 
     const commit = () => {
+      // Undo/redo rebuilds the page and detaches old widgets. A late change
+      // event from one of those inputs must not overwrite the restored state or
+      // truncate the redo branch.
+      if (!input.isConnected) return;
       if (input.type === 'checkbox') s.formValues[name] = input.checked ? 'true' : 'false';
       else if (input.type === 'radio') {
         if (input.checked) s.formValues[name] = input.value;
       } else s.formValues[name] = input.value;
       setDirty(s, true);
+      pushHistory(s, {
+        label: 'Edit form field',
+        coalesceKey: input.type === 'text' || input.tagName === 'TEXTAREA' ? `field:${name}` : null,
+      });
     };
     input.addEventListener('input', commit);
     input.addEventListener('change', commit);
@@ -758,6 +1000,7 @@ async function layoutPage(s, idx) {
 
   paintAnnotations(s, idx);
   paintSearch(s, idx);
+  renderSignPlacement(s, idx);
 }
 
 function paintAnnotations(s, idx) {
@@ -978,6 +1221,7 @@ async function onOverlayUp(s, ev, idx) {
 function addAnnotation(s, ann) {
   s.annotations.push(ann);
   setDirty(s, true);
+  pushHistory(s, { label: 'Add annotation' });
 }
 
 function eraseAt(s, idx, px, py) {
@@ -1010,6 +1254,7 @@ function eraseAt(s, idx, px, py) {
 function removeAnnotation(s, id) {
   s.annotations = s.annotations.filter((a) => a.id !== id);
   setDirty(s, true);
+  pushHistory(s, { label: 'Erase annotation' });
   for (const idx of s.pageOrder) paintAnnotations(s, idx);
 }
 
@@ -1359,8 +1604,120 @@ async function prepareSignDialog() {
 
 /* ---------------------------------------------------------------- signing */
 
+function syncSignPlacementBar(s) {
+  if (s !== state) return;
+  const visible = Boolean(s && hasDoc(s) && s.signPlacement);
+  el['sign-place-bar'].hidden = !visible;
+  document.body.classList.toggle('placing-signature', visible);
+}
+
+function clearSignPlacement(s) {
+  if (!s) return;
+  s.signPlacement = null;
+  for (const idx of s.pageOrder) {
+    const layer = s.pageEls.get(idx)?.div.querySelector('.sign-layer');
+    if (layer) layer.replaceChildren();
+  }
+  if (s === state) {
+    el['sign-place-bar'].hidden = true;
+    document.body.classList.remove('placing-signature');
+    el['btn-sign'].classList.remove('is-active');
+  }
+}
+
+function cancelSignPlacement(s) {
+  if (!s) return;
+  clearSignPlacement(s);
+  s.signMode = false;
+  if (s === state) {
+    document.body.classList.remove('sign-mode');
+    el['btn-sign'].classList.remove('is-active');
+    for (const idx of s.pageOrder) layoutPage(s, idx);
+    setMsg('');
+  }
+}
+
+function renderSignPlacement(s, idx) {
+  const entry = s.pageEls.get(idx);
+  if (!entry) return;
+  const layer = entry.div.querySelector('.sign-layer');
+  if (!layer) return;
+  const placement = s.signPlacement;
+  if (!placement || placement.page !== idx || !entry.vp) {
+    layer.replaceChildren();
+    return;
+  }
+
+  let target = layer.querySelector('.sign-target');
+  if (!target) {
+    target = document.createElement('div');
+    target.className = 'sign-target';
+    target.setAttribute('role', 'group');
+    target.setAttribute('aria-label', 'Signature placement. Drag to move.');
+    target.innerHTML =
+      '<span class="sign-target-label">Signature</span>' +
+      '<span class="sign-target-hint">Drag to move</span>';
+    target.addEventListener('pointerdown', (ev) => onSignTargetDown(s, ev, idx));
+    layer.appendChild(target);
+  }
+
+  const r = viewportRect(entry.vp, placement.rect);
+  target.style.left = `${r.x}px`;
+  target.style.top = `${r.y}px`;
+  target.style.width = `${r.w}px`;
+  target.style.height = `${r.h}px`;
+}
+
+function onSignTargetDown(s, ev, idx) {
+  const placement = s.signPlacement;
+  const entry = s.pageEls.get(idx);
+  if (!placement || placement.page !== idx || !entry || !entry.vp || ev.button !== 0) return;
+  const start = pointerToUser(s, ev, idx);
+  if (!start) return;
+
+  ev.preventDefault();
+  ev.stopPropagation();
+  const target = ev.currentTarget;
+  const startRect = { ...placement.rect };
+  const pageW = entry.vp.width / entry.vp.scale;
+  const pageH = entry.vp.height / entry.vp.scale;
+  target.classList.add('is-dragging');
+
+  const move = (event) => {
+    if (s.signPlacement !== placement) return;
+    const point = pointerToUser(s, event, idx);
+    if (!point) return;
+    placement.rect.x = clamp(
+      startRect.x + point.ux - start.ux,
+      4,
+      Math.max(4, pageW - placement.rect.w - 4)
+    );
+    placement.rect.y = clamp(
+      startRect.y + point.uy - start.uy,
+      4,
+      Math.max(4, pageH - placement.rect.h - 4)
+    );
+    renderSignPlacement(s, idx);
+  };
+
+  const finish = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', finish);
+    window.removeEventListener('pointercancel', finish);
+    target.classList.remove('is-dragging');
+    if (s === state && s.signPlacement === placement) {
+      setMsg('Position set — choose Sign document to finish');
+    }
+  };
+
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', finish);
+  window.addEventListener('pointercancel', finish);
+}
+
 async function beginSign(s) {
   if (!hasDoc(s) || s !== state) return;
+  clearSignPlacement(s);
   await flushEdits(s);
   if (s !== state || s.closed) return;
   s.signMode = true;
@@ -1384,36 +1741,63 @@ async function placeSignature(s, ev, idx) {
   const y = clamp(point.uy - h, 4, Math.max(4, base.height - h - 4));
 
   s.signMode = false;
+  s.signPlacement = { page: idx, rect: { x, y, w, h } };
   document.body.classList.remove('sign-mode');
-  el['btn-sign'].classList.remove('is-active');
+  el['btn-sign'].classList.add('is-active');
+  for (const i of s.pageOrder) layoutPage(s, i);
+  syncSignPlacementBar(s);
+  setMsg('Drag the signature box to move it, then choose Sign document');
+}
 
+function startOrConfirmSign(s) {
+  if (!hasDoc(s) || s !== state) return;
+  if (s.signPlacement) {
+    confirmSignature(s).catch((err) => setMsgFor(s, `Signing failed: ${err.message || err}`));
+    return;
+  }
+  beginSign(s).catch((err) => setMsgFor(s, String(err.message || err)));
+}
+
+async function confirmSignature(s) {
+  const placement = s.signPlacement;
+  if (!hasDoc(s) || s !== state || !placement) return;
+  const { page: idx, rect } = placement;
+
+  el['sign-place-bar'].hidden = true;
   el['sign-name'].value = el['sign-name'].value || 'OmniPDF User';
   await prepareSignDialog();
   const ok = await openDialog(el['dlg-sign']);
   if (!ok) {
-    setMsg('Signing cancelled');
-    for (const i of s.pageOrder) layoutPage(s, i);
+    if (s.closed) return;
+    syncSignPlacementBar(s);
+    setMsgFor(s, 'Signing cancelled — drag the box to adjust it, or sign when ready');
     return;
   }
 
-  setMsg('Signing…');
-  const result = await window.omnipdf.sign({
-    bytes: s.bytes,
-    pageIndex: idx,
-    rect: { x, y, w, h },
-    name: el['sign-name'].value.trim() || 'OmniPDF User',
-    reason: el['sign-reason'].value.trim(),
-    location: el['sign-location'].value.trim(),
-    signatureImage: signatureBase64() || undefined,
-    formValues: {},
-    annotations: [],
-    pageOps: { rotations: {} },
-  });
+  setMsgFor(s, 'Signing…');
+  try {
+    const result = await window.omnipdf.sign({
+      bytes: s.bytes,
+      pageIndex: idx,
+      rect: { x: rect.x, y: rect.y, w: rect.w, h: rect.h },
+      name: el['sign-name'].value.trim() || 'OmniPDF User',
+      reason: el['sign-reason'].value.trim(),
+      location: el['sign-location'].value.trim(),
+      signatureImage: signatureBase64() || undefined,
+      formValues: {},
+      annotations: [],
+      pageOps: { rotations: {} },
+    });
 
-  if (s.closed) return;
-  await openBytes(s, result.bytes, s.fileName, s.filePath);
-  setDirty(s, true);
-  setMsgFor(s, 'Signed — save to write the signature to disk');
+    if (s.closed) return;
+    await openBytes(s, result.bytes, s.fileName, s.filePath, { history: 'none', dirty: true });
+    setDirty(s, true);
+    pushHistory(s, { label: 'Sign document' });
+    setMsgFor(s, 'Signed — save to write the signature to disk');
+  } catch (err) {
+    setMsgFor(s, `Signing failed: ${err.message || err}`);
+    if (s.signPlacement) syncSignPlacementBar(s);
+  }
 }
 
 /* ------------------------------------------------------------------- edit */
@@ -1453,7 +1837,8 @@ async function flushEdits(s) {
   }
   const bytes = await buildEditedBytes(s);
   if (s.closed) return;
-  await openBytes(s, bytes, s.fileName, s.filePath);
+  await openBytes(s, bytes, s.fileName, s.filePath, { history: 'none', dirty: true });
+  if (!s.closed) syncHistoryCurrent(s);
 }
 
 function pdfHasSignature(bytes) {
@@ -1509,8 +1894,10 @@ async function save(s, asNew) {
   }
 
   if (s.closed) return;
-  await openBytes(s, bytes, s.fileName, target);
+  await openBytes(s, bytes, s.fileName, target, { history: 'none', dirty: false });
   setDirty(s, false);
+  syncHistoryCurrent(s);
+  refreshRecentFiles();
   setMsgFor(s, signed && pending ? 'Saved a modified copy; the previous signature was removed' : 'Saved');
 }
 
@@ -1580,8 +1967,9 @@ async function runOcr(s) {
       pageOps: { rotations: {} },
     });
     if (s.closed) return;
-    await openBytes(s, result.bytes, s.fileName, s.filePath);
+    await openBytes(s, result.bytes, s.fileName, s.filePath, { history: 'none', dirty: true });
     setDirty(s, true);
+    pushHistory(s, { label: 'Run OCR' });
     const words = result.results.reduce((sum, r) => sum + r.wordCount, 0);
     const conf = result.results.length
       ? Math.round(result.results.reduce((sum, r) => sum + r.confidence, 0) / result.results.length)
@@ -1614,6 +2002,7 @@ async function runSearch(s, query) {
   if (!needle || !hasDoc(s)) {
     if (s === state) {
       el['search-count'].textContent = '';
+      syncFindButtons(s);
       for (const idx of s.pageOrder) paintSearch(s, idx);
     }
     return;
@@ -1629,9 +2018,63 @@ async function runSearch(s, query) {
 
   if (s !== state) return;
   el['search-count'].textContent = String(s.searchHits.length);
+  syncFindButtons(s);
   for (const idx of s.pageOrder) paintSearch(s, idx);
   if (s.searchHits.length) gotoHit(s, 0);
-  else setMsg('No matches');
+  else {
+    setMsg('No matches');
+    syncFindButtons(s);
+  }
+}
+
+function syncFindButtons(s) {
+  const found = Boolean(s && s.searchHits.length);
+  el['btn-find-prev'].disabled = !found;
+  el['btn-find-next'].disabled = !found;
+}
+
+function focusSearch() {
+  if (!hasDoc(state)) {
+    setMsg('Open a PDF to search');
+    return;
+  }
+  el.search.focus();
+  el.search.select();
+}
+
+function clearSearch(s) {
+  if (!hasDoc(s)) return;
+  window.clearTimeout(s.searchTimer);
+  el.search.value = '';
+  s.searchQuery = '';
+  runSearch(s, '').catch(() => {});
+}
+
+function isEditingTarget(target) {
+  return Boolean(
+    target instanceof HTMLElement &&
+      (target.matches('input, textarea, select') || target.isContentEditable)
+  );
+}
+
+function stepFind(delta) {
+  const s = state;
+  if (!hasDoc(s)) return;
+  if (!s.searchHits.length) {
+    if (!s.searchQuery.trim()) {
+      focusSearch();
+      return;
+    }
+    runSearch(s, s.searchQuery)
+      .then(() => {
+        if (delta < 0 && s === state && s.searchHits.length) {
+          gotoHit(s, s.searchHits.length - 1);
+        }
+      })
+      .catch(() => {});
+    return;
+  }
+  gotoHit(s, s.searchActive + delta);
 }
 
 function gotoHit(s, i) {
@@ -1642,14 +2085,30 @@ function gotoHit(s, i) {
   if (pos >= 0) scrollToPage(s, pos);
   for (const idx of s.pageOrder) paintSearch(s, idx);
   el['search-count'].textContent = `${s.searchActive + 1}/${s.searchHits.length}`;
+  syncFindButtons(s);
 }
 
 /* ------------------------------------------------------------- navigation */
 
 function scrollToPage(s, pos) {
-  if (s !== state) return;
-  const target = el.pages.children[pos];
+  if (s !== state || !hasDoc(s)) return;
+  const safe = clamp(Number(pos) || 0, 0, Math.max(0, s.pageOrder.length - 1));
+  s.current = safe;
+  el['page-input'].value = String(safe + 1);
+  for (const [idx, thumb] of s.thumbEls) {
+    thumb.classList.toggle('is-current', s.pageOrder[safe] === idx);
+  }
+  const target = el.pages.children[safe];
   if (target) target.scrollIntoView({ block: 'start', behavior: 'auto' });
+}
+
+function focusPageInput() {
+  if (!hasDoc(state)) {
+    setMsg('Open a PDF first');
+    return;
+  }
+  el['page-input'].focus();
+  el['page-input'].select();
 }
 
 function updateCurrentPage(s) {
@@ -1764,6 +2223,19 @@ async function fitWidth(s) {
   await setScale(s, available / Math.max(vp.width, 1));
 }
 
+async function fitPage(s) {
+  if (!hasDoc(s) || s !== state) return;
+  const vp = await getViewport(s, s.pageOrder[s.current], 1);
+  const availableW = Math.max(120, el.viewer.clientWidth - 56);
+  const availableH = Math.max(120, el.viewer.clientHeight - 40);
+  await setScale(s, Math.min(availableW / Math.max(vp.width, 1), availableH / Math.max(vp.height, 1)));
+}
+
+async function actualSize(s) {
+  if (!hasDoc(s) || s !== state) return;
+  await setScale(s, 1);
+}
+
 /* --------------------------------------------------------------- commands */
 
 function setTool(next) {
@@ -1796,6 +2268,7 @@ async function rotateCurrent(s) {
     await renderPage(s, idx);
   }
   setDirty(s, true);
+  pushHistory(s, { label: 'Rotate page' });
   setMsg('Page rotated — save to apply');
 }
 
@@ -1821,6 +2294,7 @@ async function deleteCurrent(s) {
   el['page-input'].max = String(s.pageOrder.length);
   scrollToPage(s, s.current);
   setDirty(s, true);
+  pushHistory(s, { label: 'Delete page' });
   setMsg('Page deleted — save to apply');
 }
 
@@ -1837,11 +2311,25 @@ async function openInNewTab(doc) {
   if (existing) {
     activateTab(existing);
     setMsg('Already open');
+    refreshRecentFiles();
     return existing;
   }
   const tab = newTab();
   await openBytes(tab, doc.bytes, doc.name, doc.path);
+  if (doc.path) refreshRecentFiles();
   return tab;
+}
+
+async function openPathInNewTab(filePath) {
+  if (!filePath) return;
+  try {
+    const doc = await window.omnipdf.openPath(filePath);
+    if (doc) await openInNewTab(doc);
+    else refreshRecentFiles();
+  } catch (err) {
+    setMsg(`Could not open recent file: ${err.message || err}`);
+    refreshRecentFiles();
+  }
 }
 
 async function openFile() {
@@ -1861,6 +2349,233 @@ async function openDropped(file) {
   }
   const buffer = new Uint8Array(await file.arrayBuffer());
   await openInNewTab({ path: null, name: file.name, bytes: buffer });
+}
+
+function renderRecentFiles(items) {
+  const list = el['recent-list'];
+  list.replaceChildren();
+  const valid = Array.isArray(items) ? items : [];
+  el['recent-files'].hidden = !valid.length;
+  for (const item of valid) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'recent-item';
+    button.title = item.path;
+
+    const name = document.createElement('span');
+    name.className = 'recent-name';
+    name.textContent = item.name;
+    const folder = document.createElement('span');
+    folder.className = 'recent-folder';
+    folder.textContent = item.folder;
+    button.append(name, folder);
+    button.addEventListener('click', () => openPathInNewTab(item.path));
+    list.appendChild(button);
+  }
+}
+
+async function refreshRecentFiles() {
+  try {
+    renderRecentFiles(await window.omnipdf.listRecent());
+  } catch {
+    renderRecentFiles([]);
+  }
+}
+
+/* --------------------------------------------------------------- properties */
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return '—';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatPdfDate(value) {
+  if (!value) return '—';
+  const m = /^D:(\d{4})(\d{2})(\d{2})(\d{2})?(\d{2})?(\d{2})?/.exec(String(value));
+  if (!m) return String(value);
+  const date = new Date(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    Number(m[4] || 0),
+    Number(m[5] || 0),
+    Number(m[6] || 0)
+  );
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+}
+
+async function collectDocumentProperties(s) {
+  if (!hasDoc(s)) return null;
+  let info = {};
+  try {
+    const meta = await s.pdf.getMetadata();
+    info = (meta && meta.info) || {};
+  } catch {
+    info = {};
+  }
+
+  let pageSize = '—';
+  try {
+    const idx = s.pageOrder[s.current] ?? s.pageOrder[0];
+    const page = await s.pdf.getPage(idx + 1);
+    const rotation = (((page.rotate + (s.rotations[idx] || 0)) % 360) + 360) % 360;
+    const vp = page.getViewport({ scale: 1, rotation });
+    pageSize = `${Math.round(vp.width)} × ${Math.round(vp.height)} pt`;
+  } catch {
+    /* keep the placeholder */
+  }
+
+  return {
+    fileName: s.fileName || 'Untitled',
+    title: info.Title || '',
+    author: info.Author || '',
+    subject: info.Subject || '',
+    keywords: info.Keywords || '',
+    creator: info.Creator || '',
+    producer: info.Producer || '',
+    created: formatPdfDate(info.CreationDate),
+    modified: formatPdfDate(info.ModDate),
+    version: info.PDFFormatVersion || '—',
+    pages: s.pageOrder.length,
+    pageSize,
+    fileSize: formatBytes(s.bytes ? s.bytes.length : 0),
+    path: s.filePath || '',
+  };
+}
+
+async function showProperties() {
+  const s = state;
+  if (!hasDoc(s)) {
+    setMsg('Open a PDF to view its properties');
+    return;
+  }
+  let props;
+  try {
+    props = await collectDocumentProperties(s);
+  } catch (err) {
+    setMsg(`Could not read document properties: ${err.message || err}`);
+    return;
+  }
+  if (!props || s.closed) return;
+
+  const rows = [
+    ['File name', props.fileName],
+    ['Title', props.title || '—'],
+    ['Author', props.author || '—'],
+    ['Subject', props.subject || '—'],
+    ['Keywords', props.keywords || '—'],
+    ['Creator', props.creator || '—'],
+    ['Producer', props.producer || '—'],
+    ['Created', props.created],
+    ['Modified', props.modified],
+    ['PDF version', props.version],
+    ['Pages', String(props.pages)],
+    ['Current page size', props.pageSize],
+    ['File size', props.fileSize],
+  ];
+  el['props-body'].replaceChildren();
+  for (const [label, value] of rows) {
+    const dt = document.createElement('dt');
+    dt.textContent = label;
+    const dd = document.createElement('dd');
+    dd.textContent = value || '—';
+    el['props-body'].append(dt, dd);
+  }
+  el['props-path'].textContent = props.path || 'This PDF has not been saved yet.';
+  el['props-reveal'].disabled = !props.path;
+  el['props-reveal'].dataset.path = props.path;
+  await openDialog(el['dlg-props']);
+}
+
+/* ------------------------------------------------------------------ print */
+
+function clearPrintImages() {
+  for (const url of printUrls) URL.revokeObjectURL(url);
+  printUrls = [];
+  el['print-root'].replaceChildren();
+}
+
+async function preparePrintImages(s) {
+  if (!hasDoc(s)) return 0;
+  clearPrintImages();
+  const bytes = hasPendingEdits(s) ? await buildEditedBytes(s) : s.bytes;
+  const doc = await pdfjsLib.getDocument(pdfLoadOptions(bytes)).promise;
+  const count = doc.numPages;
+  try {
+    for (let pageNumber = 1; pageNumber <= count; pageNumber += 1) {
+      if (s.closed) return 0;
+      setMsgFor(s, `Preparing page ${pageNumber} of ${count} for print…`);
+      const page = await doc.getPage(pageNumber);
+      const base = page.getViewport({ scale: 1 });
+      const scale = Math.min(
+        PRINT_DPI / 72,
+        Math.sqrt(MAX_PRINT_PIXELS / Math.max(1, base.width * base.height))
+      );
+      const vp = page.getViewport({ scale });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.floor(vp.width));
+      canvas.height = Math.max(1, Math.floor(vp.height));
+      const ctx = canvas.getContext('2d', { alpha: false });
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: ctx, canvas, viewport: vp }).promise;
+
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+      if (!blob) throw new Error(`Could not prepare page ${pageNumber}`);
+      const url = URL.createObjectURL(blob);
+      printUrls.push(url);
+
+      const image = new Image();
+      image.alt = `Page ${pageNumber}`;
+      image.src = url;
+      await image.decode();
+      const wrapper = document.createElement('div');
+      wrapper.className = 'print-page';
+      wrapper.appendChild(image);
+      el['print-root'].appendChild(wrapper);
+    }
+  } finally {
+    try {
+      await doc.destroy();
+    } catch {
+      /* ignore */
+    }
+  }
+  return count;
+}
+
+async function printCurrent(s) {
+  if (printBusy) return;
+  if (!hasDoc(s) || s !== state) {
+    setMsg('Open a PDF to print');
+    return;
+  }
+
+  printBusy = true;
+  el['btn-print'].disabled = true;
+  try {
+    const count = await preparePrintImages(s);
+    if (!count || s.closed) return;
+    setMsgFor(s, `Opening the print dialog for ${count} page${count === 1 ? '' : 's'}…`);
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const result = await window.omnipdf.printDocument();
+    if (s.closed) return;
+    if (result && result.success) {
+      setMsgFor(s, `Print job sent — ${count} page${count === 1 ? '' : 's'}`);
+    } else if (result && result.failureReason && !/cancel/i.test(result.failureReason)) {
+      setMsgFor(s, `Printing failed: ${result.failureReason}`);
+    } else {
+      setMsgFor(s, 'Print cancelled');
+    }
+  } catch (err) {
+    setMsgFor(s, `Printing failed: ${err.message || err}`);
+  } finally {
+    clearPrintImages();
+    printBusy = false;
+    el['btn-print'].disabled = false;
+  }
 }
 
 /* ---------------------------------------------------------------- updates */
@@ -2026,8 +2741,28 @@ function bind() {
   el['btn-new-tab'].addEventListener('click', () => openFile());
   el['btn-save'].addEventListener('click', () => save(state, false));
   el['btn-saveas'].addEventListener('click', () => save(state, true));
+  el['btn-print'].addEventListener('click', () => printCurrent(state));
+  el['recent-clear'].addEventListener('click', async () => {
+    try {
+      await window.omnipdf.clearRecent();
+    } finally {
+      refreshRecentFiles();
+    }
+  });
+  el['props-reveal'].addEventListener('click', () => {
+    const filePath = el['props-reveal'].dataset.path;
+    if (filePath) window.omnipdf.reveal(filePath);
+  });
+  el['btn-undo'].addEventListener('click', () => undoDocument(state));
+  el['btn-redo'].addEventListener('click', () => redoDocument(state));
   el['btn-ocr'].addEventListener('click', () => runOcr(state));
-  el['btn-sign'].addEventListener('click', () => beginSign(state));
+  el['btn-sign'].addEventListener('click', () => startOrConfirmSign(state));
+  el['sign-place-confirm'].addEventListener('click', () => {
+    if (state) confirmSignature(state).catch((err) => setMsg(`Signing failed: ${err.message || err}`));
+  });
+  el['sign-place-cancel'].addEventListener('click', () => {
+    if (state) cancelSignPlacement(state);
+  });
   el['btn-rotate'].addEventListener('click', () => rotateCurrent(state));
   el['btn-delete-page'].addEventListener('click', () => deleteCurrent(state));
   el['btn-extract'].addEventListener('click', () => extractCurrent(state));
@@ -2054,6 +2789,14 @@ function bind() {
   el['btn-fit'].addEventListener('click', () => {
     if (state) fitWidth(state);
   });
+  el['btn-fit-page'].addEventListener('click', () => {
+    if (state) fitPage(state);
+  });
+  el['btn-actual'].addEventListener('click', () => {
+    if (state) actualSize(state);
+  });
+  el['btn-find-prev'].addEventListener('click', () => stepFind(-1));
+  el['btn-find-next'].addEventListener('click', () => stepFind(1));
 
   for (const button of document.querySelectorAll('#tool-group .tool')) {
     button.addEventListener('click', () => setTool(button.dataset.tool));
@@ -2070,7 +2813,12 @@ function bind() {
   });
   el.search.addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter' && state) {
+      ev.preventDefault();
       gotoHit(state, state.searchActive + (ev.shiftKey ? -1 : 1));
+    } else if (ev.key === 'Escape' && state) {
+      ev.preventDefault();
+      clearSearch(state);
+      el.search.blur();
     }
   });
 
@@ -2087,12 +2835,51 @@ function bind() {
       save(state, ev.shiftKey);
       return;
     }
+    if (ev.ctrlKey && !ev.altKey && ev.key.toLowerCase() === 'f') {
+      ev.preventDefault();
+      focusSearch();
+      return;
+    }
+    if (ev.ctrlKey && !ev.altKey && ev.key.toLowerCase() === 'g') {
+      ev.preventDefault();
+      focusPageInput();
+      return;
+    }
     if (ev.ctrlKey && !ev.altKey && ev.key === 'Tab') {
       ev.preventDefault();
       cycleTabs(ev.shiftKey ? -1 : 1);
       return;
     }
+    if (ev.key === 'F3') {
+      ev.preventDefault();
+      stepFind(ev.shiftKey ? -1 : 1);
+      return;
+    }
+    if (!isEditingTarget(ev.target) && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+      if (ev.key === 'PageDown' || ev.key === 'PageUp') {
+        if (!hasDoc(state)) return;
+        ev.preventDefault();
+        scrollToPage(state, state.current + (ev.key === 'PageDown' ? 1 : -1));
+        return;
+      }
+    }
+    if (!isEditingTarget(ev.target) && ev.ctrlKey && !ev.altKey && (ev.key === 'Home' || ev.key === 'End')) {
+      if (!hasDoc(state)) return;
+      ev.preventDefault();
+      scrollToPage(state, ev.key === 'Home' ? 0 : state.pageOrder.length - 1);
+      return;
+    }
     if (ev.key === 'Escape') {
+      if (document.activeElement === el.search) {
+        ev.preventDefault();
+        clearSearch(state);
+        el.search.blur();
+        return;
+      }
+      if (state && state.signPlacement) {
+        cancelSignPlacement(state);
+        return;
+      }
       if (state && state.signMode) {
         state.signMode = false;
         document.body.classList.remove('sign-mode');
@@ -2129,16 +2916,22 @@ function bind() {
     })();
   });
 
-  window.omnipdf.onMenu((action) => {
+  window.omnipdf.onMenu((payload) => {
+    const action = typeof payload === 'string' ? payload : payload && payload.action;
+    const filePath = payload && typeof payload === 'object' ? payload.path : '';
     if (action === 'open' || action === 'newTab') openFile();
+    else if (action === 'openRecent') openPathInNewTab(filePath);
+    else if (action === 'recentCleared') refreshRecentFiles();
     else if (action === 'closeTab') closeTab(state);
     else if (action === 'nextTab') cycleTabs(1);
     else if (action === 'prevTab') cycleTabs(-1);
     else if (action === 'save') save(state, false);
     else if (action === 'saveAs') save(state, true);
+    else if (action === 'print') printCurrent(state);
+    else if (action === 'properties') showProperties();
     else if (action === 'extract') extractCurrent(state);
     else if (action === 'ocr') runOcr(state);
-    else if (action === 'sign') beginSign(state);
+    else if (action === 'sign') startOrConfirmSign(state);
     else if (action === 'rotate') rotateCurrent(state);
     else if (action === 'zoomIn') {
       if (state) setScale(state, state.scale * 1.2);
@@ -2146,7 +2939,12 @@ function bind() {
       if (state) setScale(state, state.scale / 1.2);
     } else if (action === 'fit') {
       if (state) fitWidth(state);
-    } else if (action === 'focusSearch') el.search.focus();
+    } else if (action === 'fitPage') {
+      if (state) fitPage(state);
+    } else if (action === 'actualSize') {
+      if (state) actualSize(state);
+    } else if (action === 'gotoPage') focusPageInput();
+    else if (action === 'focusSearch') focusSearch();
     else if (action === 'cert') showCert();
   });
 
@@ -2162,6 +2960,7 @@ function bind() {
     }
   });
 
+  refreshRecentFiles();
   bindUpdates();
 }
 
@@ -2199,6 +2998,39 @@ window.__smoke = async (base64) => {
     const entry = first.pageEls.get(idx);
     const page0 = await first.pdf.getPage(1);
     const anns = await page0.getAnnotations({ intent: 'display' });
+
+    // Ease-of-use paths: metadata, find navigation, and print preparation.
+    const props = await collectDocumentProperties(first);
+    await runSearch(first, 'fixture');
+    const findHits = first.searchHits.length;
+    const findOnPage = first.searchHits[0] ? first.searchHits[0].page : -1;
+    el['btn-find-next'].click();
+    const findAfterNext = first.searchActive;
+    await runSearch(first, '');
+
+    const printPages = await preparePrintImages(first);
+    const printRendered = el['print-root'].querySelectorAll('.print-page img').length;
+    const printImageWidth = printRendered
+      ? el['print-root'].querySelector('.print-page img').naturalWidth
+      : 0;
+    clearPrintImages();
+    renderRecentFiles([
+      { name: 'recent-smoke.pdf', folder: 'C:\\Temp', path: 'C:\\Temp\\recent-smoke.pdf' },
+    ]);
+    const recentRendered =
+      !el['recent-files'].hidden && el['recent-list'].querySelectorAll('.recent-item').length === 1;
+    renderRecentFiles([]);
+    const featuresCheck =
+      Boolean(props) &&
+      props.pages === first.pageOrder.length &&
+      props.fileSize !== '—' &&
+      findHits === 3 &&
+      findOnPage === 0 &&
+      findAfterNext === 1 &&
+      printPages === first.pageOrder.length &&
+      printRendered === printPages &&
+      printImageWidth > 0 &&
+      recentRendered;
 
     // A second document must not disturb the first, and switching back has to
     // rebuild the first tab's pages from that tab's own state.
@@ -2246,7 +3078,7 @@ window.__smoke = async (base64) => {
 
     return {
       build: BUILD_TAG,
-      ok: items.length > 0 && tabCheck,
+      ok: items.length > 0 && tabCheck && featuresCheck,
       pages: first.pdf.numPages,
       textItems: items.length,
       sample: items.map((i) => i.str).join(' ').slice(0, 100),
@@ -2255,6 +3087,18 @@ window.__smoke = async (base64) => {
       widgetDiag: entry ? entry.widgetDiag : null,
       annotations: anns.map((a) => a.subtype + ':' + (a.fieldName || '-')).slice(0, 6),
       canvasWidth: entry ? entry.div.querySelector('.page-canvas').width : 0,
+      features: {
+        propsPages: props ? props.pages : 0,
+        propsSize: props ? props.fileSize : '',
+        findHits,
+        findOnPage,
+        findAfterNext,
+        printPages,
+        printRendered,
+        printImageWidth,
+        recentRendered,
+        featuresCheck,
+      },
       tabs: {
         twoTabsOpen,
         secondLabel,

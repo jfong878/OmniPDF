@@ -9,6 +9,7 @@ const { saveWithEdits, extractPages } = require('./src/core/edit');
 const { ensureSigner, signPdf } = require('./src/core/sign');
 const ocr = require('./src/core/ocr');
 const signatures = require('./src/main/signatures');
+const recent = require('./src/main/recent');
 const updater = require('./src/main/updater');
 
 const SMOKE = process.argv.includes('--smoke');
@@ -129,6 +130,62 @@ async function readDocument(filePath) {
   return { path: filePath, name: path.basename(filePath), bytes: data };
 }
 
+function sendMenu(payload) {
+  const win = BrowserWindow.getFocusedWindow() || mainWindow;
+  if (!win || win.isDestroyed()) return;
+  win.webContents.send('menu', payload);
+}
+
+function rememberFile(filePath) {
+  try {
+    recent.add(userDir(), filePath);
+    buildMenu();
+  } catch {
+    /* recents are a convenience; never fail an open or save over them */
+  }
+}
+
+function forgetFile(filePath) {
+  try {
+    recent.remove(userDir(), filePath);
+    buildMenu();
+  } catch {
+    /* ignore */
+  }
+}
+
+function clearRecentFromMenu() {
+  try {
+    recent.clear(userDir());
+  } finally {
+    buildMenu();
+    sendMenu({ action: 'recentCleared' });
+  }
+}
+
+function recentSubmenu() {
+  let items = [];
+  try {
+    items = recent.list(userDir());
+  } catch {
+    items = [];
+  }
+  if (!items.length) return [{ label: 'No Recent Files', enabled: false }];
+
+  const counts = new Map();
+  for (const item of items) counts.set(item.name, (counts.get(item.name) || 0) + 1);
+  const submenu = items.map((item) => ({
+    label:
+      counts.get(item.name) > 1 ? `${item.name} — ${item.folder}` : item.name,
+    click: () => sendMenu({ action: 'openRecent', path: item.path }),
+  }));
+  submenu.push(
+    { type: 'separator' },
+    { label: 'Clear Recently Opened', click: clearRecentFromMenu }
+  );
+  return submenu;
+}
+
 function createWindow() {
   const iconPath = path.join(__dirname, 'assets', 'icon.ico');
   mainWindow = new BrowserWindow({
@@ -228,10 +285,7 @@ function openBugReport() {
 }
 
 function buildMenu() {
-  const send = (action) => () => {
-    const win = BrowserWindow.getFocusedWindow() || mainWindow;
-    if (win) win.webContents.send('menu', action);
-  };
+  const send = (action) => () => sendMenu({ action });
 
   const template = [
     {
@@ -239,11 +293,14 @@ function buildMenu() {
       submenu: [
         { label: 'New Tab…', accelerator: 'CmdOrCtrl+T', click: send('newTab') },
         { label: 'Open…', accelerator: 'CmdOrCtrl+O', click: send('open') },
+        { label: 'Open Recent', submenu: recentSubmenu() },
         { label: 'Close Tab', accelerator: 'CmdOrCtrl+W', click: send('closeTab') },
         { type: 'separator' },
         { label: 'Save', accelerator: 'CmdOrCtrl+S', click: send('save') },
         { label: 'Save As…', accelerator: 'CmdOrCtrl+Shift+S', click: send('saveAs') },
+        { label: 'Print…', accelerator: 'CmdOrCtrl+P', click: send('print') },
         { label: 'Extract Page…', click: send('extract') },
+        { label: 'Properties…', accelerator: 'CmdOrCtrl+D', click: send('properties') },
         { type: 'separator' },
         { label: 'Next Tab', accelerator: 'Ctrl+Tab', registerAccelerator: false, click: send('nextTab') },
         { label: 'Previous Tab', accelerator: 'Ctrl+Shift+Tab', registerAccelerator: false, click: send('prevTab') },
@@ -271,6 +328,10 @@ function buildMenu() {
         { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', click: send('zoomIn') },
         { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: send('zoomOut') },
         { label: 'Fit Width', accelerator: 'CmdOrCtrl+0', click: send('fit') },
+        { label: 'Fit Page', accelerator: 'CmdOrCtrl+2', click: send('fitPage') },
+        { label: 'Actual Size', accelerator: 'CmdOrCtrl+1', click: send('actualSize') },
+        { label: 'Go to Page…', accelerator: 'CmdOrCtrl+G', click: send('gotoPage') },
+        { type: 'separator' },
         { label: 'Rotate Page', accelerator: 'CmdOrCtrl+R', click: send('rotate') },
         { type: 'separator' },
         { role: 'togglefullscreen' },
@@ -373,6 +434,24 @@ ipcMain.handle('update:check', () => updater.check({ interactive: true }));
 ipcMain.handle('update:download', () => updater.download());
 ipcMain.handle('update:install', () => updater.install());
 
+ipcMain.handle('print:document', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) return { success: false, failureReason: 'No window to print' };
+  return new Promise((resolve) => {
+    win.webContents.print(
+      { silent: false, printBackground: true, color: true },
+      (success, failureReason) => resolve({ success, failureReason: failureReason || '' })
+    );
+  });
+});
+
+ipcMain.handle('recent:list', () => recent.list(userDir()));
+ipcMain.handle('recent:clear', () => {
+  recent.clear(userDir());
+  buildMenu();
+  return [];
+});
+
 ipcMain.handle('cert:info', () => {
   const signer = ensureSigner(userDir());
   return { ...signer.info, path: path.join(userDir(), 'signer.p12') };
@@ -389,17 +468,27 @@ ipcMain.handle('file:open', async () => {
     filters: [{ name: 'PDF documents', extensions: ['pdf'] }],
   });
   if (result.canceled || !result.filePaths.length) return null;
-  return readDocument(result.filePaths[0]);
+  const doc = await readDocument(result.filePaths[0]);
+  rememberFile(doc.path);
+  return doc;
 });
 
 ipcMain.handle('file:openPath', async (_event, filePath) => {
   if (!filePath || path.extname(filePath).toLowerCase() !== '.pdf') return null;
-  return readDocument(filePath);
+  try {
+    const doc = await readDocument(filePath);
+    rememberFile(doc.path);
+    return doc;
+  } catch (err) {
+    forgetFile(filePath);
+    throw err;
+  }
 });
 
 ipcMain.handle('file:save', async (_event, payload) => {
   if (!payload || !payload.path) return null;
   await fsp.writeFile(payload.path, Buffer.from(payload.bytes));
+  rememberFile(payload.path);
   return { path: payload.path, name: path.basename(payload.path) };
 });
 
@@ -411,6 +500,7 @@ ipcMain.handle('file:saveAs', async (_event, payload) => {
   });
   if (result.canceled || !result.filePath) return null;
   await fsp.writeFile(result.filePath, Buffer.from(payload.bytes));
+  rememberFile(result.filePath);
   return { path: result.filePath, name: path.basename(result.filePath) };
 });
 

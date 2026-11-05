@@ -8,6 +8,7 @@ const { PDFDocument } = require('pdf-lib');
 const { saveWithEdits, extractPages } = require('../src/core/edit');
 const { ensureSigner, signPdf } = require('../src/core/sign');
 const signatures = require('../src/main/signatures');
+const recent = require('../src/main/recent');
 const { ocrPng, setCacheDir } = require('../src/core/ocr');
 
 const root = process.cwd();
@@ -153,6 +154,29 @@ console.log('\n[6] OCR');
       JSON.stringify(w && w.bbox)
     );
   }
+}
+
+console.log('\n[7] recent files');
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'omnipdf-recent-'));
+  const alpha = path.join(dir, 'alpha.pdf');
+  const beta = path.join(dir, 'beta.PDF');
+  fs.writeFileSync(alpha, source);
+  fs.writeFileSync(beta, source);
+
+  recent.add(dir, alpha);
+  recent.add(dir, beta);
+  recent.add(dir, alpha);
+  let entries = recent.list(dir);
+  check('most recent file comes first', entries[0] && entries[0].path === alpha, JSON.stringify(entries));
+  check('duplicate paths are removed', entries.filter((item) => item.path === alpha).length === 1);
+  check('recent entries include names', entries[0] && entries[0].name === 'alpha.pdf', JSON.stringify(entries[0]));
+
+  fs.unlinkSync(beta);
+  entries = recent.list(dir);
+  check('missing files are pruned', entries.every((item) => item.path !== beta), JSON.stringify(entries));
+  recent.clear(dir);
+  check('recent list can be cleared', recent.list(dir).length === 0);
 }
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`);
