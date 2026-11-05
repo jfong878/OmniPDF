@@ -14,7 +14,7 @@ const MAX_CANVAS_PIXELS = 8_000_000;
 const MAX_PRINT_PIXELS = 12_000_000;
 const PRINT_DPI = 150;
 const HISTORY_LIMIT = 40;
-const BUILD_TAG = 'build-8';
+const BUILD_TAG = 'build-9';
 
 const IDS = [
   'btn-open', 'btn-save', 'btn-saveas', 'btn-print', 'btn-undo', 'btn-redo', 'btn-prev', 'btn-next',

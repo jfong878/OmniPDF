@@ -3,7 +3,7 @@
 All notable changes to OmniPDF are recorded here. Releases follow Semantic
 Versioning.
 
-## [Unreleased]
+## [1.1.0] - 2026-11-05
 
 ### Added
 
