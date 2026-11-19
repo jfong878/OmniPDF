@@ -70,7 +70,12 @@ jobs:
           # published release's bytes are immutable: fill in missing assets and
           # never overwrite the verified installer, blockmap or feed.
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "Release $GITHUB_REF_NAME already exists; verifying assets."
+            is_draft="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft')"
+            if [ "$is_draft" = "true" ]; then
+              echo "Release $GITHUB_REF_NAME is a draft; completing it before publishing."
+            else
+              echo "Release $GITHUB_REF_NAME already exists; verifying assets."
+            fi
             present="$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name')"
             for asset in "${assets[@]}"; do
               name="$(basename "$asset")"
@@ -81,8 +86,15 @@ jobs:
                 gh release upload "$GITHUB_REF_NAME" "$asset"
               fi
             done
-            gh release edit "$GITHUB_REF_NAME" --title "OmniPDF $version"
-            echo "release-ready $GITHUB_REF_NAME (existing)"
+            # An unfinished draft would exit 0 while the feed still points at the
+            # previous version, so publish it instead of treating it as done.
+            if [ "$is_draft" = "true" ]; then
+              gh release edit "$GITHUB_REF_NAME" --draft=false --title "OmniPDF $version"
+              echo "release-published $GITHUB_REF_NAME (draft completed)"
+            else
+              gh release edit "$GITHUB_REF_NAME" --title "OmniPDF $version"
+              echo "release-ready $GITHUB_REF_NAME (existing)"
+            fi
             exit 0
           fi
           gh release create "$GITHUB_REF_NAME" \
