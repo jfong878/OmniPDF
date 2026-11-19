@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>OmniPDF</title>
+    <link rel="stylesheet" href="viewer.css" />
+  </head>
+  <body>
+    <header id="toolbar">
+      <div class="group">
+        <button id="btn-open" class="primary" title="Open a PDF (Ctrl+O)">Open</button>
+        <button id="btn-download" title="Download PDF (Ctrl+S)" disabled>Download</button>
+        <button id="btn-print" title="Print PDF (Ctrl+P)" disabled>Print</button>
+      </div>
+
+      <div class="group" aria-label="Page navigation">
+        <button id="btn-prev" title="Previous page" disabled>&#8249;</button>
+        <input id="page-input" type="number" min="1" value="1" aria-label="Page number" disabled />
+        <span id="page-total">/ 0</span>
+        <button id="btn-next" title="Next page" disabled>&#8250;</button>
+      </div>
+
+      <div class="group" aria-label="Zoom">
+        <button id="btn-zoom-out" title="Zoom out" disabled>&minus;</button>
+        <span id="zoom-label">100%</span>
+        <button id="btn-zoom-in" title="Zoom in" disabled>+</button>
+        <button id="btn-fit" title="Fit width (Ctrl+0)" disabled>Fit width</button>
+        <button id="btn-fit-page" title="Fit page (Ctrl+2)" disabled>Fit page</button>
+        <button id="btn-actual" title="Actual size (Ctrl+1)" disabled>100%</button>
+      </div>
+
+      <div class="group grow">
+        <input id="search" type="search" placeholder="Search document…" aria-label="Search document" disabled />
+        <span id="search-count"></span>
+        <button id="btn-find-prev" class="find-step" title="Previous match (Shift+F3)" aria-label="Previous match" disabled>&#8593;</button>
+        <button id="btn-find-next" class="find-step" title="Next match (F3)" aria-label="Next match" disabled>&#8595;</button>
+      </div>
+
+      <div class="group">
+        <span id="build-label">Chrome</span>
+      </div>
+    </header>
+
+    <main id="viewer">
+      <div id="pages"></div>
+      <div id="empty-state">
+        <div class="empty-mark">PDF</div>
+        <h1 id="empty-title">Open a PDF</h1>
+        <p id="empty-copy">Drop a PDF anywhere in this window, or choose one below.</p>
+        <p class="hint">Pinch with two fingers to zoom. Gmail attachments can be opened without downloading first.</p>
+        <div class="empty-actions">
+          <button id="empty-open" class="primary">Choose a PDF</button>
+          <button id="empty-gmail">Open Gmail</button>
+        </div>
+        <a id="empty-source" href="#" target="_blank" rel="noopener" hidden>Open original attachment</a>
+        <section id="tips" aria-label="Gmail integration">
+          <strong>From Gmail</strong>
+          <span>Use the <b>Open in OmniPDF</b> button beside a PDF attachment, or right-click its link and choose <b>Open PDF in OmniPDF</b>.</span>
+        </section>
+      </div>
+    </main>
+
+    <footer id="statusbar">
+      <span id="status-file">No document</span>
+      <span id="status-msg">Ready</span>
+    </footer>
+
+    <input id="file-input" type="file" accept="application/pdf,.pdf" hidden />
+    <div id="print-root" aria-hidden="true"></div>
+
+    <noscript>OmniPDF for Chrome needs JavaScript.</noscript>
+    <script type="module" src="viewer.js"></script>
+  </body>
+</html>

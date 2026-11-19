@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=440, initial-scale=1" />
+    <title>OmniPDF for Chrome</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body {
+        width: 440px;
+        height: 280px;
+        margin: 0;
+        overflow: hidden;
+        background: #16181c;
+        color: #dfe4ec;
+        font-family: "Segoe UI", system-ui, sans-serif;
+      }
+      body {
+        position: relative;
+        background:
+          radial-gradient(circle at 86% 10%, rgba(77, 141, 255, 0.26), transparent 44%),
+          radial-gradient(circle at 2% 100%, rgba(230, 80, 70, 0.2), transparent 40%),
+          #16181c;
+      }
+      body::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background-image:
+          linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+        background-size: 28px 28px;
+        mask-image: linear-gradient(90deg, #000, transparent 82%);
+      }
+      main {
+        position: relative;
+        z-index: 1;
+        height: 100%;
+        padding: 24px 22px;
+        display: flex;
+        flex-direction: column;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+      .brand img {
+        width: 27px;
+        height: 27px;
+        border-radius: 7px;
+        box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35);
+      }
+      h1 {
+        margin: 21px 0 7px;
+        max-width: 250px;
+        font-size: 34px;
+        line-height: 1.02;
+        letter-spacing: -0.035em;
+        font-weight: 700;
+      }
+      h1 em {
+        color: #8cb8ff;
+        font-style: normal;
+      }
+      p {
+        margin: 0;
+        max-width: 238px;
+        color: #aab4c2;
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      .chips {
+        display: flex;
+        gap: 5px;
+        margin-top: auto;
+      }
+      .chips span {
+        padding: 3px 7px;
+        border: 1px solid #35404e;
+        border-radius: 999px;
+        color: #c2cbd8;
+        background: rgba(29, 32, 38, 0.8);
+        font-size: 9px;
+        font-weight: 600;
+      }
+      .card {
+        position: absolute;
+        right: 24px;
+        top: 58px;
+        width: 138px;
+        height: 174px;
+        padding: 13px;
+        border: 1px solid #3c4552;
+        border-radius: 8px;
+        background: #20242b;
+        box-shadow: 0 18px 36px rgba(0, 0, 0, 0.45);
+        transform: rotate(4deg);
+      }
+      .sheet {
+        height: 100%;
+        padding: 15px 12px;
+        border-radius: 3px;
+        background: #fff;
+        box-shadow: 0 5px 14px rgba(0, 0, 0, 0.28);
+      }
+      .sheet::before {
+        content: "PDF";
+        display: block;
+        margin-bottom: 16px;
+        padding: 3px 5px;
+        width: fit-content;
+        border-radius: 3px;
+        background: #e65046;
+        color: #fff;
+        font-size: 7px;
+        font-weight: 800;
+        letter-spacing: 0.06em;
+      }
+      .line {
+        height: 4px;
+        margin-bottom: 6px;
+        border-radius: 999px;
+        background: #efc7c4;
+      }
+      .line.short { width: 62%; }
+      .line.blue { width: 76%; background: #b8d2ff; }
+      .open {
+        position: absolute;
+        right: -17px;
+        bottom: 24px;
+        padding: 7px 9px;
+        border: 1px solid #5d94ff;
+        border-radius: 5px;
+        background: #2f5fae;
+        color: #fff;
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+        font-size: 9px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="brand">
+        <img src="/assets/icon-128.png" alt="" />
+        <span>OmniPDF</span>
+      </div>
+      <h1>Gmail PDFs,<br /><em>opened.</em></h1>
+      <p>A touch-friendly PDF viewer. Nothing leaves Chrome.</p>
+      <div class="chips">
+        <span>Pinch zoom</span>
+        <span>Search</span>
+        <span>Print</span>
+      </div>
+    </main>
+    <div class="card" aria-hidden="true">
+      <div class="sheet">
+        <div class="line"></div>
+        <div class="line"></div>
+        <div class="line short"></div>
+        <div class="line blue"></div>
+      </div>
+      <div class="open">Open in OmniPDF</div>
+    </div>
+  </body>
+</html>

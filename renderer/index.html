@@ -32,7 +32,16 @@
 
       <div class="group">
         <button id="btn-zoom-out" title="Zoom out">&minus;</button>
-        <span id="zoom-label">100%</span>
+        <input
+          id="zoom-label"
+          type="text"
+          value="100%"
+          inputmode="decimal"
+          autocomplete="off"
+          spellcheck="false"
+          aria-label="Zoom percentage"
+          title="Enter a zoom percentage (25–500%)"
+        />
         <button id="btn-zoom-in" title="Zoom in">+</button>
         <button id="btn-fit" title="Fit width (Ctrl+0)">Fit width</button>
         <button id="btn-fit-page" title="Fit page (Ctrl+2)">Fit page</button>

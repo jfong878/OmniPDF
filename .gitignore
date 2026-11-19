@@ -4,3 +4,5 @@ dist/
 .tessdata/
 .tools/
 .freebuff/
+chrome-extension/vendor/
+chrome-extension/icons/

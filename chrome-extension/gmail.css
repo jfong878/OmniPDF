@@ -1,0 +1,54 @@
+button.omnipdf-gmail-open {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: auto !important;
+  min-width: 0 !important;
+  min-height: 24px !important;
+  margin: 0 0 0 7px !important;
+  padding: 2px 8px !important;
+  border: 1px solid #4d8dff !important;
+  border-radius: 999px !important;
+  background: #eef4ff !important;
+  color: #174ea6 !important;
+  font: 600 11px/1.4 "Google Sans", Roboto, Arial, sans-serif !important;
+  letter-spacing: 0 !important;
+  text-transform: none !important;
+  white-space: nowrap !important;
+  cursor: pointer !important;
+  vertical-align: middle !important;
+  box-shadow: none !important;
+}
+
+button.omnipdf-gmail-open:hover {
+  background: #dce9ff !important;
+}
+
+button.omnipdf-gmail-open:disabled {
+  opacity: 0.65 !important;
+  cursor: wait !important;
+}
+
+#omnipdf-gmail-toast {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 2147483647;
+  max-width: min(440px, calc(100vw - 44px));
+  padding: 10px 13px;
+  border: 1px solid #4d8dff;
+  border-radius: 8px;
+  background: #1d2026;
+  color: #dfe4ec;
+  font: 12px/1.45 "Google Sans", Roboto, Arial, sans-serif;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.32);
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+
+#omnipdf-gmail-toast.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}

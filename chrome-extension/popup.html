@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OmniPDF</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <img src="icons/icon-48.png" alt="" width="34" height="34" />
+      <div>
+        <h1>OmniPDF</h1>
+        <p>PDFs from your desktop or Gmail.</p>
+      </div>
+    </header>
+    <button id="open-viewer" class="primary">Open PDF viewer</button>
+    <button id="open-gmail">Open Gmail</button>
+    <p class="hint">
+      In Gmail, choose <strong>Open in OmniPDF</strong> beside a PDF attachment. You can
+      also right-click a PDF attachment link and choose <strong>Open PDF in OmniPDF</strong>.
+    </p>
+    <details id="diagnostics" class="diagnostics">
+      <summary>
+        <span>Diagnostics</span>
+        <span id="diagnostics-count" class="count" hidden>0</span>
+      </summary>
+      <p id="diagnostics-empty" class="diagnostics-empty">
+        No Gmail fetch or transfer failures recorded.
+      </p>
+      <ul id="diagnostics-list" class="diagnostics-list" hidden></ul>
+      <div class="diagnostics-actions">
+        <button id="diagnostics-copy" type="button" disabled>Copy details</button>
+        <button id="diagnostics-clear" type="button" disabled>Clear log</button>
+      </div>
+    </details>
+    <p class="note">The Chrome viewer is for reading and sharing. Signing, OCR and document edits stay in the desktop app.</p>
+    <script src="popup.js"></script>
+  </body>
+</html>

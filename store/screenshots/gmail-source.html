@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>OmniPDF Gmail store screenshot</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body {
+        width: 1280px;
+        height: 800px;
+        margin: 0;
+        overflow: hidden;
+        background: #f6f8fc;
+        color: #202124;
+        font-family: Arial, "Segoe UI", sans-serif;
+      }
+      button { font: inherit; }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        height: 64px;
+        padding: 0 18px 0 14px;
+      }
+      .brand { display: flex; align-items: center; gap: 7px; width: 238px; }
+      .menu {
+        display: grid;
+        gap: 4px;
+        width: 40px;
+        height: 40px;
+        place-content: center;
+        border: 0;
+        border-radius: 50%;
+        background: transparent;
+      }
+      .menu span { display: block; width: 18px; height: 2px; border-radius: 2px; background: #5f6368; }
+      .logo-m {
+        margin-left: 4px;
+        color: #ea4335;
+        font-size: 26px;
+        font-weight: 700;
+        letter-spacing: -1px;
+      }
+      .logo-text { color: #5f6368; font-size: 22px; letter-spacing: -0.4px; }
+
+      .search {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex: 1;
+        max-width: 700px;
+        height: 46px;
+        padding: 0 16px;
+        border-radius: 24px;
+        background: #eaf1fb;
+        color: #5f6368;
+        font-size: 15px;
+      }
+      .search svg { flex: 0 0 auto; }
+      .search .tune { margin-left: auto; }
+
+      .top-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+      .round {
+        display: grid;
+        place-items: center;
+        width: 40px;
+        height: 40px;
+        border: 0;
+        border-radius: 50%;
+        background: transparent;
+        color: #5f6368;
+      }
+      .avatar {
+        display: grid;
+        place-items: center;
+        width: 32px;
+        height: 32px;
+        margin-left: 8px;
+        border-radius: 50%;
+        background: #7b1fa2;
+        color: #fff;
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .shell { display: flex; height: 736px; }
+
+      .sidebar {
+        flex: 0 0 256px;
+        padding: 8px 12px 0 12px;
+        color: #202124;
+        font-size: 14px;
+      }
+      .compose {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        width: 140px;
+        height: 52px;
+        margin: 0 0 16px 4px;
+        padding: 0 20px;
+        border: 0;
+        border-radius: 16px;
+        background: #c2e7ff;
+        color: #001d35;
+        font-size: 14px;
+        font-weight: 600;
+        box-shadow: 0 1px 2px rgba(60, 64, 67, 0.3);
+      }
+      .nav-item {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        height: 32px;
+        margin-bottom: 2px;
+        padding: 0 12px 0 16px;
+        border-radius: 0 16px 16px 0;
+        color: #202124;
+        font-size: 14px;
+      }
+      .nav-item.active { background: #d3e3fd; font-weight: 700; }
+      .nav-item .count { margin-left: auto; font-size: 12px; font-weight: 700; }
+      .nav-label {
+        margin: 22px 0 8px;
+        padding-left: 16px;
+        color: #444746;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.2px;
+      }
+      .storage {
+        position: absolute;
+        bottom: 18px;
+        left: 20px;
+        color: #444746;
+        font-size: 11px;
+      }
+      .storage-bar {
+        width: 190px;
+        height: 4px;
+        margin-top: 7px;
+        border-radius: 2px;
+        background: #d9e0ea;
+      }
+      .storage-bar span { display: block; width: 32%; height: 100%; border-radius: 2px; background: #4d8dff; }
+
+      .main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        margin-left: 4px;
+        border-radius: 16px 0 0 0;
+        background: #fff;
+        overflow: hidden;
+      }
+      .mail-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        height: 48px;
+        padding: 0 16px 0 8px;
+        border-bottom: 1px solid #f1f3f4;
+        color: #5f6368;
+      }
+      .mail-toolbar .round { width: 34px; height: 34px; }
+      .mail-toolbar .end { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 12px; }
+
+      .content { padding: 14px 40px 0 40px; }
+      .subject-row { display: flex; align-items: center; gap: 12px; }
+      .subject-row h1 {
+        margin: 0;
+        font-size: 22px;
+        font-weight: 400;
+        letter-spacing: 0.1px;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        height: 20px;
+        padding: 0 8px;
+        border-radius: 4px;
+        background: #e8eaed;
+        color: #5f6368;
+        font-size: 11px;
+      }
+      .chip b { color: #3c4043; font-weight: 400; }
+
+      .message { display: flex; gap: 14px; margin-top: 22px; }
+      .sender-avatar {
+        display: grid;
+        place-items: center;
+        flex: 0 0 40px;
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        background: #1a73e8;
+        color: #fff;
+        font-size: 15px;
+        font-weight: 700;
+      }
+      .meta { flex: 1; min-width: 0; }
+      .meta-top { display: flex; align-items: flex-start; gap: 8px; }
+      .sender { font-size: 14px; font-weight: 700; }
+      .email { margin-left: 4px; color: #5f6368; font-size: 12px; }
+      .to-me { margin-left: 4px; color: #5f6368; font-size: 12px; }
+      .meta-actions { display: flex; align-items: center; gap: 2px; margin-left: auto; color: #5f6368; }
+      .stamp { color: #5f6368; font-size: 12px; }
+
+      .body {
+        max-width: 780px;
+        margin: 16px 0 0 54px;
+        color: #202124;
+        font-size: 13.5px;
+        line-height: 1.55;
+      }
+      .body p { margin: 0 0 12px; }
+      .attach-head {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin: 22px 0 12px;
+        color: #5f6368;
+        font-size: 12px;
+      }
+      .attach-head strong { color: #202124; font-size: 13px; font-weight: 700; }
+      .attach-head .spacer { flex: 1; }
+
+      .cards { display: flex; gap: 28px; }
+      .card-wrap { width: 252px; }
+      .card {
+        overflow: hidden;
+        border: 1px solid #dadce0;
+        border-radius: 10px;
+        background: #fff;
+        transition: box-shadow 120ms ease;
+      }
+      .thumb {
+        display: grid;
+        place-items: center;
+        height: 148px;
+        background: #f1f3f4;
+      }
+      .pdf-page {
+        position: relative;
+        width: 92px;
+        height: 120px;
+        padding: 26px 12px 0;
+        border-radius: 2px;
+        background: #fff;
+        box-shadow: 0 1px 4px rgba(60, 64, 67, 0.25);
+      }
+      .pdf-badge {
+        position: absolute;
+        top: 8px;
+        left: -6px;
+        padding: 2px 5px;
+        border-radius: 2px;
+        background: #ea4335;
+        color: #fff;
+        font-size: 8px;
+        font-weight: 700;
+        letter-spacing: 0.4px;
+      }
+      .page-title { width: 55px; height: 5px; margin-bottom: 6px; border-radius: 2px; background: #c4c7c5; }
+      .page-line { width: 66px; height: 3px; margin-bottom: 4px; border-radius: 2px; background: #e0e2e1; }
+      .page-line.short { width: 44px; }
+      .page-photo {
+        width: 66px;
+        height: 34px;
+        margin-top: 8px;
+        border-radius: 2px;
+        background: linear-gradient(135deg, #dbe8fb, #eef4ff);
+        border: 1px solid #d7dde6;
+      }
+      .file-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px 11px; }
+      .pdf-icon {
+        display: grid;
+        place-items: center;
+        flex: 0 0 auto;
+        width: 20px;
+        height: 24px;
+        border-radius: 2px;
+        background: #ea4335;
+        color: #fff;
+        font-size: 6px;
+        font-weight: 700;
+      }
+      .file-name {
+        overflow: hidden;
+        color: #202124;
+        font-size: 11.5px;
+        font-weight: 600;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .file-size { margin-top: 2px; color: #5f6368; font-size: 10.5px; }
+
+      /* Same treatment as chrome-extension/gmail.css. */
+      .omnipdf-gmail-open {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 24px;
+        margin: 7px 0 0 0;
+        padding: 2px 8px;
+        border: 1px solid #4d8dff;
+        border-radius: 999px;
+        background: #eef4ff;
+        color: #174ea6;
+        font: 600 11px/1.4 Arial, "Segoe UI", sans-serif;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+      .omnipdf-gmail-open:hover { background: #dce9ff; }
+
+      .callout {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 26px;
+        color: #174ea6;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .callout .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #4d8dff;
+      }
+      .callout span { color: #5f6368; font-weight: 400; }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <button class="menu" type="button" aria-label="Main menu">
+          <span></span><span></span><span></span>
+        </button>
+        <span class="logo-m">M</span>
+        <span class="logo-text">Gmail</span>
+      </div>
+      <div class="search">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <circle cx="11" cy="11" r="6.5" stroke="#5f6368" stroke-width="1.7" />
+          <path d="M16 16l4 4" stroke="#5f6368" stroke-width="1.7" stroke-linecap="round" />
+        </svg>
+        <span>Search mail</span>
+        <svg class="tune" width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M4 7h16M4 12h16M4 17h16" stroke="#5f6368" stroke-width="1.6" stroke-linecap="round" />
+          <circle cx="9" cy="7" r="2.1" fill="#eaf1fb" stroke="#5f6368" stroke-width="1.6" />
+          <circle cx="15" cy="12" r="2.1" fill="#eaf1fb" stroke="#5f6368" stroke-width="1.6" />
+          <circle cx="10" cy="17" r="2.1" fill="#eaf1fb" stroke="#5f6368" stroke-width="1.6" />
+        </svg>
+      </div>
+      <div class="top-actions">
+        <button class="round" type="button" aria-label="Support">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <circle cx="12" cy="12" r="8.4" stroke="#5f6368" stroke-width="1.6" />
+            <path d="M9.7 9.4a2.4 2.4 0 1 1 3.4 2.2c-.8.4-1.1.8-1.1 1.6v.4" stroke="#5f6368" stroke-width="1.6" stroke-linecap="round" />
+            <circle cx="12" cy="16.7" r="0.9" fill="#5f6368" />
+          </svg>
+        </button>
+        <button class="round" type="button" aria-label="Settings">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="#5f6368" aria-hidden="true">
+            <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84a.48.48 0 0 0-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.48.48 0 0 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z" />
+          </svg>
+        </button>
+        <button class="round" type="button" aria-label="Google apps">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="#5f6368" aria-hidden="true">
+            <circle cx="3" cy="3" r="1.6" /><circle cx="9" cy="3" r="1.6" /><circle cx="15" cy="3" r="1.6" />
+            <circle cx="3" cy="9" r="1.6" /><circle cx="9" cy="9" r="1.6" /><circle cx="15" cy="9" r="1.6" />
+            <circle cx="3" cy="15" r="1.6" /><circle cx="9" cy="15" r="1.6" /><circle cx="15" cy="15" r="1.6" />
+          </svg>
+        </button>
+        <span class="avatar" aria-label="Account">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="#fff" aria-hidden="true">
+            <circle cx="12" cy="8" r="4" />
+            <path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8z" />
+          </svg>
+        </span>
+      </div>
+    </header>
+
+    <div class="shell">
+      <aside class="sidebar">
+        <button class="compose" type="button">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="#001d35" aria-hidden="true">
+            <path d="M3 17.25V21h3.75L17.8 9.94l-3.75-3.75L3 17.25zM20.7 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" />
+          </svg>
+          Compose
+        </button>
+        <div class="nav-item active">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M4 5.5h16v13H4z" stroke="#202124" stroke-width="1.6" /><path d="M4.5 6l7.5 6 7.5-6" stroke="#202124" stroke-width="1.6" />
+          </svg>
+          Inbox <span class="count">23</span>
+        </div>
+        <div class="nav-item">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 4.5l2.3 4.7 5.2.8-3.8 3.7.9 5.2-4.6-2.5-4.6 2.5.9-5.2L4.5 10l5.2-.8L12 4.5z" stroke="#202124" stroke-width="1.5" /></svg>
+          Starred
+        </div>
+        <div class="nav-item">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="#202124" stroke-width="1.5" /><path d="M12 7.5V12l3 2" stroke="#202124" stroke-width="1.5" stroke-linecap="round" /></svg>
+          Snoozed
+        </div>
+        <div class="nav-item">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 5.5h16v13H4z" stroke="#202124" stroke-width="1.6" /><path d="M4.5 6l7.5 6 7.5-6" stroke="#202124" stroke-width="1.6" /></svg>
+          Sent
+        </div>
+        <div class="nav-item">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 4.5h9l4 4v11H6z" stroke="#202124" stroke-width="1.5" /><path d="M15 4.5v4h4" stroke="#202124" stroke-width="1.5" /></svg>
+          Drafts
+        </div>
+        <div class="nav-item">More</div>
+        <div class="nav-label">Labels</div>
+        <div class="nav-item"><span style="width:10px;height:10px;border-radius:2px;background:#fbbc04"></span> Receipts</div>
+        <div class="nav-item"><span style="width:10px;height:10px;border-radius:2px;background:#34a853"></span> Travel</div>
+        <div class="storage">
+          1.4 GB of 15 GB used
+          <div class="storage-bar"><span></span></div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <div class="mail-toolbar">
+          <button class="round" type="button" aria-label="Back">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M14.5 5.5L8 12l6.5 6.5" stroke="#5f6368" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" /></svg>
+          </button>
+          <button class="round" type="button" aria-label="Archive">
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 5.5h16v4H4zM5.5 9.5V19h13V9.5M9.5 13h5" stroke="#5f6368" stroke-width="1.6" stroke-linejoin="round" /></svg>
+          </button>
+          <button class="round" type="button" aria-label="Delete">
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 7h14M9 7V5h6v2M7 7l1 12h8l1-12M10 10.5v5.5M14 10.5v5.5" stroke="#5f6368" stroke-width="1.6" stroke-linecap="round" /></svg>
+          </button>
+          <button class="round" type="button" aria-label="Mark as unread">
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 6h16v12H4z" stroke="#5f6368" stroke-width="1.6" /><path d="M4.5 6.5l7.5 6 7.5-6" stroke="#5f6368" stroke-width="1.6" /></svg>
+          </button>
+          <button class="round" type="button" aria-label="Snooze">
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="#5f6368" stroke-width="1.6" /><path d="M12 7.5V12l3 2" stroke="#5f6368" stroke-width="1.6" stroke-linecap="round" /></svg>
+          </button>
+          <button class="round" type="button" aria-label="Move to">
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3.5 6.5h6l2 2h9v10h-17z" stroke="#5f6368" stroke-width="1.6" stroke-linejoin="round" /></svg>
+          </button>
+          <div class="end">
+            <span>1 of 56</span>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 6l6 6-6 6" stroke="#9aa0a6" stroke-width="1.8" stroke-linecap="round" /></svg>
+          </div>
+        </div>
+
+        <div class="content">
+          <div class="subject-row">
+            <h1>Northwind Community Picnic — Sample Message</h1>
+            <span class="chip"><b>Inbox</b> ×</span>
+          </div>
+
+          <div class="message">
+            <div class="sender-avatar">CO</div>
+            <div class="meta">
+              <div class="meta-top">
+                <span class="sender">Community Outreach</span>
+                <span class="email">&lt;outreach@example.org&gt;</span>
+                <span class="to-me">to me</span>
+                <span class="meta-actions">
+                  <span class="stamp">Nov 17, 2026, 10:42 AM</span>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 4.5l2.3 4.7 5.2.8-3.8 3.7.9 5.2-4.6-2.5-4.6 2.5.9-5.2L4.5 10l5.2-.8L12 4.5z" stroke="#5f6368" stroke-width="1.5" /></svg>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 7L4 12l5 5M4.5 12H20" stroke="#5f6368" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="#5f6368" aria-hidden="true"><circle cx="12" cy="5.5" r="1.5" /><circle cx="12" cy="12" r="1.5" /><circle cx="12" cy="18.5" r="1.5" /></svg>
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div class="body">
+            <p>Hello,</p>
+            <p>
+              Sharing the updated flyer and the volunteer sheet for Wednesday's community
+              picnic. Both are ready to print and hand out at the welcome table.
+            </p>
+            <p>Thanks,<br />Community Outreach</p>
+
+            <div class="attach-head">
+              <strong>2 Attachments</strong>
+              <span>•</span>
+              <span>Scanned by Gmail</span>
+              <span class="spacer"></span>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 4v10M8 10l4 4 4-4M5 19h14" stroke="#5f6368" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 4l8 14H4z" stroke="#5f6368" stroke-width="1.4" stroke-linejoin="round" /></svg>
+            </div>
+
+            <div class="cards">
+              <div class="card-wrap">
+                <div class="card">
+                  <div class="thumb">
+                    <div class="pdf-page">
+                      <span class="pdf-badge">PDF</span>
+                      <div class="page-title"></div>
+                      <div class="page-line"></div>
+                      <div class="page-line"></div>
+                      <div class="page-line short"></div>
+                      <div class="page-photo"></div>
+                      <div class="page-line" style="margin-top: 8px"></div>
+                      <div class="page-line short"></div>
+                    </div>
+                  </div>
+                  <div class="file-row">
+                    <span class="pdf-icon">PDF</span>
+                    <div style="min-width: 0">
+                      <div class="file-name">Northwind Picnic Flyer.pdf</div>
+                      <div class="file-size">1.1 MB</div>
+                    </div>
+                  </div>
+                </div>
+                <button class="omnipdf-gmail-open" type="button">Open in OmniPDF</button>
+              </div>
+
+              <div class="card-wrap">
+                <div class="card">
+                  <div class="thumb">
+                    <div class="pdf-page">
+                      <span class="pdf-badge">PDF</span>
+                      <div class="page-title"></div>
+                      <div class="page-line"></div>
+                      <div class="page-line short"></div>
+                      <div class="page-photo" style="height: 46px"></div>
+                      <div class="page-line" style="margin-top: 7px"></div>
+                      <div class="page-line"></div>
+                      <div class="page-line short"></div>
+                    </div>
+                  </div>
+                  <div class="file-row">
+                    <span class="pdf-icon">PDF</span>
+                    <div style="min-width: 0">
+                      <div class="file-name">Northwind Volunteer Sheet.pdf</div>
+                      <div class="file-size">840 KB</div>
+                    </div>
+                  </div>
+                </div>
+                <button class="omnipdf-gmail-open" type="button">Open in OmniPDF</button>
+              </div>
+            </div>
+
+            <div class="callout">
+              <span class="dot"></span>
+              Open PDF attachments in a touch-friendly tab.
+              <span>Search, pinch zoom, print, and download.</span>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>

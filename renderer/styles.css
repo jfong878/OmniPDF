@@ -132,6 +132,26 @@ button:disabled {
   font-variant-numeric: tabular-nums;
 }
 
+#zoom-label {
+  width: 58px;
+  padding: 3px 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+}
+
+#zoom-label:hover {
+  background: #14161a;
+  border-color: var(--line);
+}
+
+#zoom-label:focus {
+  outline: none;
+  background: #14161a;
+  border-color: var(--accent);
+  color: #fff;
+}
+
 #search {
   flex: 1;
   min-width: 120px;
@@ -303,6 +323,8 @@ main {
   overflow: auto;
   background: #101215;
   scroll-behavior: auto;
+  touch-action: pan-x pan-y;
+  overscroll-behavior: contain;
 }
 
 #pages {
@@ -311,6 +333,11 @@ main {
   align-items: center;
   gap: 18px;
   padding: 20px 20px 80px;
+  transform-origin: 0 0;
+}
+
+#pages.is-pinching {
+  will-change: transform;
 }
 
 .page {
@@ -324,6 +351,40 @@ main {
   display: block;
   width: 100%;
   height: 100%;
+  background: #fff;
+}
+
+.page-error {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 28px;
+  background: #fff;
+  color: #4a3520;
+  text-align: center;
+  pointer-events: none;
+}
+
+.page-error[hidden] {
+  display: none;
+}
+
+.page-error strong {
+  color: #1d2026;
+  font-size: 14px;
+}
+
+.page-error span {
+  max-width: 38em;
+  color: #5d6572;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .text-layer {

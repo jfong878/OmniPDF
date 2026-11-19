@@ -27,9 +27,58 @@ npm run selftest   # core checks: forms, annotations, rotation, delete, extract,
 npm run smoke      # Electron: rendering, text, widgets, tabs, find, metadata, print layout
 ```
 
+## Chrome viewer for Gmail attachments
+
+`chrome-extension/` is a separate Manifest V3 extension that opens PDFs in a
+touch-friendly Chrome tab. It reuses the PDF.js renderer and adds an
+**Open in OmniPDF** button beside PDF attachments in Gmail. This first Chrome
+version is read-only: signing, OCR, annotation editing and form saving remain
+in the desktop app. It requires Chrome 140 or newer and has no server
+component; Gmail bytes go from the signed-in Gmail tab into local extension
+storage only long enough for the viewer to consume them.
+
+```bash
+npm run chrome:build
+```
+
+Then open `chrome://extensions`, enable **Developer mode**, choose **Load
+unpacked**, and select the `chrome-extension/` directory. Open a local PDF with
+the toolbar's **Open** button, or use the Gmail attachment button/right-click
+menu. The extension fetches Gmail attachments with the signed-in Gmail session
+and keeps the bytes only until the viewer reads them.
+
+The build step copies PDF.js and the app icons into ignored directories
+(`chrome-extension/vendor/` and `chrome-extension/icons/`), so rerun
+`npm run chrome:build` after changing `pdfjs-dist`. The viewer supports touch
+pinch-to-zoom, trackpad pinch, fit width/page, search, page navigation and
+printing. It is not published to the Chrome Web Store; load it unpacked for
+local use.
+
+For a Chrome Web Store upload ZIP, run:
+
+```bash
+npm run chrome:package
+```
+
+That writes `dist/chrome/OmniPDF-Chrome-<version>.zip` and its SHA-256 file.
+The listing copy, permission justifications, privacy answers, screenshots and
+promo tile are in `store/`; see `store/README.md` and [PRIVACY.md](PRIVACY.md).
+
+To verify the packaged extension itself, run:
+
+```bash
+npm run chrome:smoke
+```
+
+It packages the ZIP, extracts it into a fresh temporary Chrome profile, loads
+it through Chrome's DevTools pipe, and checks the fixture viewer's text layer
+and the diagnostics panel in both the popup page and the actual action popup
+opened by Chrome. The harness lives in `scripts/` and is not included in the
+ZIP.
+
 `selftest` runs against `assets/fixture.pdf` and is pure Node — no display needed.
 `smoke` exits non-zero if the renderer fails to load, produce text, or exercise the
-new renderer paths.
+new renderer paths, including the two-finger pinch preview and commit.
 
 ## Auto-updates
 
@@ -92,7 +141,9 @@ node scripts/make-fixture.mjs                                   # test PDF
 ```
 
 `assets/ocr-sample.png` is the OCR fixture; without it the OCR checks are
-skipped rather than failed.
+skipped rather than failed. `assets/chrome-icon-128.png` is the store-specific
+icon with 96px artwork inside 16px transparent padding; it is copied by
+`chrome:build` into the extension.
 
 ## Layout
 
@@ -137,6 +188,11 @@ produces confusing "my fix did nothing" behaviour.
 they survive zoom and page rotation. Screen mapping is done with the viewport's
 affine transform directly; pdf.js v6 removed the `PageViewport` conversion
 helpers this originally used.
+
+**Zoom.** Ctrl/Cmd-wheel, touchpad pinch, the toolbar controls and two-finger
+touch pinch all use the same bounded scale. Touch pinch previews with a CSS
+transform while the fingers move, then commits one page resize at the final
+scale and keeps the PDF point under the gesture in place.
 
 **Save pipeline.** Order matters: fill forms → draw annotations → apply
 rotations → delete pages (descending, so earlier indices stay valid). Annotations

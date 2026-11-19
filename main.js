@@ -46,6 +46,12 @@ if (!app.isPackaged) {
 // the HTTP cache has no business retaining it.
 app.commandLine.appendSwitch('disable-http-cache');
 
+// Windows touchscreens report touch points, but Chromium does not expose
+// TouchEvent handlers to Electron pages unless touch events are enabled.
+// Without this, a two-finger screen pinch only produces pointer events and
+// the viewer's pinch gesture never starts.
+if (process.platform === 'win32') app.commandLine.appendSwitch('touch-events', 'enabled');
+
 const MIME = new Map(
   Object.entries({
     '.html': 'text/html; charset=utf-8',
@@ -68,6 +74,26 @@ const pendingPaths = [];
 
 function userDir() {
   return app.getPath('userData');
+}
+
+// GPU crashes can leave the window black. Keep an append-only breadcrumb in
+// userData so a later black screen can be tied to a process exit.
+function recordGpuExit(details) {
+  try {
+    const dir = userDir();
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(
+      path.join(dir, 'gpu-process.log'),
+      `${JSON.stringify({
+        timestamp: new Date().toISOString(),
+        exitCode: details.exitCode,
+        reason: details.reason,
+        serviceName: details.serviceName || null,
+      })}\n`
+    );
+  } catch {
+    /* Diagnostics must never break the app. */
+  }
 }
 
 /** File paths from a launch command line (Explorer "Open with", CLI, etc.). */
@@ -122,6 +148,60 @@ async function serve(request) {
     });
   } catch {
     return new Response('Not found', { status: 404 });
+  }
+}
+
+/* Chrome viewer smoke: serve the unpacked extension over HTTP so the viewer's
+   own text-layer guard runs in a real browser page. */
+function startExtensionServer() {
+  const http = require('node:http');
+  const root = path.join(__dirname, 'chrome-extension');
+  const server = http.createServer((request, response) => {
+    let rel;
+    try {
+      rel = decodeURIComponent(new URL(request.url, 'http://127.0.0.1').pathname);
+    } catch {
+      response.writeHead(400).end('Bad request');
+      return;
+    }
+    const target = path.resolve(root, `.${rel || '/'}`);
+    if (target !== root && !target.startsWith(`${root}${path.sep}`)) {
+      response.writeHead(403).end('Forbidden');
+      return;
+    }
+    fs.readFile(target, (error, data) => {
+      if (error) {
+        response.writeHead(404).end('Not found');
+        return;
+      }
+      response.writeHead(200, {
+        'content-type': MIME.get(path.extname(target).toLowerCase()) || 'application/octet-stream',
+        'cache-control': 'no-store',
+      });
+      response.end(data);
+    });
+  });
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port }));
+  });
+}
+
+async function runViewerTextLayerSmoke(fixtureBase64) {
+  const { server, port } = await startExtensionServer();
+  const viewerWindow = new BrowserWindow({
+    show: false,
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false },
+  });
+  try {
+    await viewerWindow.loadURL(`http://127.0.0.1:${port}/viewer.html`);
+    return await viewerWindow.webContents.executeJavaScript(
+      `window.__smokeTextLayer(${JSON.stringify(fixtureBase64)})`
+    );
+  } finally {
+    viewerWindow.destroy();
+    server.closeAllConnections?.();
+    server.close();
   }
 }
 
@@ -245,9 +325,25 @@ function createWindow() {
       try {
         const fixture = path.join(__dirname, 'assets', 'fixture.pdf');
         const b64 = fs.readFileSync(fixture).toString('base64');
+        // A second PDF with a different first-page size exercises the fit rule
+        // without adding another checked-in fixture.
+        const { PDFDocument } = require('pdf-lib');
+        const variant = await PDFDocument.create();
+        variant.addPage([400, 600]);
+        variant.addPage([612, 792]);
+        variant.addPage([612, 792]);
+        const variantB64 = Buffer.from(await variant.save()).toString('base64');
         const result = await mainWindow.webContents.executeJavaScript(
-          `window.__smoke(${JSON.stringify(b64)})`
+          `window.__smoke(${JSON.stringify(b64)}, ${JSON.stringify(variantB64)})`
         );
+        let textLayerViewer;
+        try {
+          textLayerViewer = await runViewerTextLayerSmoke(b64);
+        } catch (error) {
+          textLayerViewer = { ok: false, error: String((error && error.stack) || error) };
+        }
+        result.textLayerViewer = textLayerViewer;
+        result.ok = Boolean(result.ok && textLayerViewer && textLayerViewer.ok);
         process.stdout.write(`SMOKE_RESULT ${JSON.stringify(result)}\n`);
         app.exit(result && result.ok ? 0 : 1);
       } catch (error) {
@@ -375,6 +471,10 @@ const gotLock = SMOKE || app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
+  app.on('child-process-gone', (_event, details) => {
+    if (details && details.type === 'GPU') recordGpuExit(details);
+  });
+
   app.on('second-instance', (_event, argv) => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();

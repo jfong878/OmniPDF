@@ -11,10 +11,12 @@ const MAX_SCALE = 5;
 const DEFAULT_SCALE = 1.15;
 const DPR = Math.min(window.devicePixelRatio || 1, 2);
 const MAX_CANVAS_PIXELS = 8_000_000;
+const MAX_CANVAS_SIDE = 8192;
 const MAX_PRINT_PIXELS = 12_000_000;
 const PRINT_DPI = 150;
+const EAGER_RENDER_LIMIT = 4;
 const HISTORY_LIMIT = 40;
-const BUILD_TAG = 'build-9';
+const BUILD_TAG = 'build-11';
 
 const IDS = [
   'btn-open', 'btn-save', 'btn-saveas', 'btn-print', 'btn-undo', 'btn-redo', 'btn-prev', 'btn-next',
@@ -47,7 +49,9 @@ let state = null; // active tab, or null when no document is open
 let tool = 'select';
 let tabSeq = 0;
 let allowUnload = false;
-let scaleTimer = null;
+let scaleRenderTimer = null;
+let pinch = null;
+let wheelZoom = null;
 let printBusy = false;
 let printUrls = [];
 
@@ -83,6 +87,7 @@ function createTab() {
     searchQuery: '',
     searchToken: 0,
     searchTimer: null,
+    pageWidth: null,
     scale: DEFAULT_SCALE,
     layoutScale: DEFAULT_SCALE,
     current: 0,
@@ -334,6 +339,7 @@ function activateTab(tab) {
   }
 
   const prev = state;
+  cancelWheelZoom();
   if (prev) {
     prev.scrollTop = el.viewer.scrollTop;
     if (prev.io) {
@@ -422,6 +428,7 @@ async function closeTab(tab) {
   el['btn-sign'].classList.remove('is-active');
 
   const next = tabs[Math.min(pos, tabs.length - 1)] || null;
+  cancelWheelZoom();
   if (next) {
     activateTab(next);
   } else {
@@ -438,13 +445,17 @@ function cycleTabs(delta) {
   activateTab(tabs[(pos + delta + tabs.length) % tabs.length]);
 }
 
+function setZoomLabel(scale) {
+  el['zoom-label'].value = `${Math.round(scale * 100)}%`;
+}
+
 function syncChrome(s) {
   document.body.classList.toggle('has-document', hasDoc(s));
   if (!s) {
     el['page-total'].textContent = '/ 0';
     el['page-input'].max = '1';
     el['page-input'].value = '1';
-    el['zoom-label'].textContent = '100%';
+    setZoomLabel(1);
     el['search-count'].textContent = '';
     el.search.value = '';
     syncFindButtons(null);
@@ -455,7 +466,7 @@ function syncChrome(s) {
   el['page-total'].textContent = `/ ${s.pageOrder.length}`;
   el['page-input'].max = String(Math.max(1, s.pageOrder.length));
   el['page-input'].value = String(Math.min(s.current + 1, Math.max(1, s.pageOrder.length)));
-  el['zoom-label'].textContent = `${Math.round(s.scale * 100)}%`;
+  setZoomLabel(wheelZoom && wheelZoom.s === s ? wheelZoom.target : s.scale);
   el['search-count'].textContent = s.searchQuery
     ? s.searchHits.length
       ? `${Math.min(s.searchActive + 1, s.searchHits.length)}/${s.searchHits.length}`
@@ -472,10 +483,20 @@ function syncChrome(s) {
 async function getViewport(s, idx, scale = s.scale) {
   const page = await s.pdf.getPage(idx + 1);
   const rotation = (((page.rotate + (s.rotations[idx] || 0)) % 360) + 360) % 360;
-  return page.getViewport({ scale, rotation });
+  // Each page uses its own width factor so mixed Letter/A4/scan pages all
+  // occupy the same on-screen width at every document zoom level.
+  const native = page.getViewport({ scale: 1, rotation });
+  const widthScale = s.pageWidth ? s.pageWidth / Math.max(1, native.width) : 1;
+  return page.getViewport({ scale: scale * widthScale, rotation });
 }
 
 /* ------------------------------------------------------------ open/reload */
+
+// Horizontal room for a page: the viewer width minus the pages' 20px side
+// padding and the scrollbar gutter.
+function availablePageWidth() {
+  return Math.max(0, el.viewer.clientWidth - 56);
+}
 
 async function openBytes(s, bytes, name, filePath, options = {}) {
   if (!s || s.closed) return;
@@ -483,6 +504,28 @@ async function openBytes(s, bytes, name, filePath, options = {}) {
   setMsgFor(s, 'Loading…');
 
   const doc = await pdfjsLib.getDocument(pdfLoadOptions(bytes)).promise;
+
+  // Give every newly opened document the same on-screen page width, whether
+  // its pages are Letter, A4, a wide printout or a scanned book. Reloads after
+  // signing or OCR keep the zoom the user was already working at.
+  if (build && s === state && s.pageWidth == null) {
+    try {
+      const page = await doc.getPage(1);
+      // A tab switch during the await must not apply this fit to another tab.
+      if (s === state && !s.closed) {
+        const width = page.getViewport({ scale: 1 }).width;
+        // Every page is laid out at this first-page width. The opening scale
+        // then fits that common width to the viewer, so pages with different
+        // native sizes no longer open at different widths.
+        s.pageWidth = Math.max(1, width);
+        if (!s.pdf && availablePageWidth() > 0) {
+          s.scale = clamp(availablePageWidth() / s.pageWidth, MIN_SCALE, MAX_SCALE);
+        }
+      }
+    } catch {
+      /* a later render will surface any real PDF error */
+    }
+  }
 
   if (s.closed) {
     try {
@@ -644,15 +687,17 @@ async function buildPages(s) {
     const vp = await getViewport(s, idx);
     if (s !== state) return;
 
+    const baseW = s.pageWidth || vp.width / s.scale;
+    const baseH = vp.height / s.scale;
     const div = document.createElement('div');
     div.className = 'page';
     div.dataset.idx = String(idx);
-    div.style.width = `${Math.floor(vp.width)}px`;
-    div.style.height = `${Math.floor(vp.height)}px`;
+    div.style.width = `${Math.max(1, Math.floor(baseW * s.scale))}px`;
+    div.style.height = `${Math.max(1, Math.floor(baseH * s.scale))}px`;
     div.innerHTML =
       '<canvas class="page-canvas"></canvas><div class="text-layer"></div>' +
       '<div class="search-layer"></div><canvas class="anno-layer"></canvas><div class="form-layer"></div>' +
-      '<div class="sign-layer"></div>';
+      '<div class="sign-layer"></div><div class="page-error" role="status" hidden></div>';
 
     const overlay = div.querySelector('.anno-layer');
     overlay.addEventListener('pointerdown', (ev) => onOverlayDown(s, ev, idx));
@@ -661,8 +706,8 @@ async function buildPages(s) {
     s.pageEls.set(idx, {
       div,
       vp,
-      baseW: vp.width / s.scale,
-      baseH: vp.height / s.scale,
+      baseW,
+      baseH,
       rendered: '',
       renderSeq: 0,
       widgets: [],
@@ -678,6 +723,15 @@ async function buildPages(s) {
   }
 
   s.layoutScale = s.scale;
+
+  // Don't wait for the IntersectionObserver to make short documents visible.
+  // It can be delayed while a window is opening or occluded, leaving newly
+  // opened pages looking blank until the user scrolls or resizes. Longer
+  // documents still render lazily to avoid holding every page in memory.
+  const eagerCount = Math.min(s.pageOrder.length, EAGER_RENDER_LIMIT);
+  for (let pos = 0; pos < eagerCount; pos += 1) {
+    renderPage(s, s.pageOrder[pos]).catch(() => {});
+  }
 
   // Thumbnails render after the first pages so opening feels immediate.
   window.setTimeout(() => {
@@ -721,13 +775,102 @@ function renderPage(s, idx) {
   return entry.chain;
 }
 
+function blankCanvas(canvas) {
+  if (!canvas) return;
+  canvas.width = 1;
+  canvas.height = 1;
+  const ctx = canvas.getContext('2d', { alpha: false });
+  if (!ctx) return;
+  // A resized alpha:false canvas is opaque black. Paint it white before the
+  // replacement render arrives so a slow high-zoom render never looks like a
+  // black page.
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, 1, 1);
+}
+
+function showPageError(entry, pageNumber, error) {
+  const box = entry && entry.div.querySelector('.page-error');
+  if (!box) return;
+  const title = document.createElement('strong');
+  title.textContent = `Page ${pageNumber} could not be rendered`;
+  const detail = document.createElement('span');
+  const message = String((error && error.message) || error || '')
+    .replace(/\s+/g, ' ')
+    .slice(0, 180);
+  detail.textContent =
+    `The rest of the document is still available. Try Fit width, a lower zoom, or reopen the file.` +
+    (message ? ` (${message})` : '');
+  box.replaceChildren(title, detail);
+  box.hidden = false;
+}
+
+function clearPageError(entry) {
+  const box = entry && entry.div.querySelector('.page-error');
+  if (!box) return;
+  box.hidden = true;
+  box.replaceChildren();
+}
+
+function swapPageCanvas(target, source) {
+  target.width = source.width;
+  target.height = source.height;
+  const context = target.getContext('2d', { alpha: false });
+  if (!context) throw new Error('Canvas is unavailable');
+  context.drawImage(source, 0, 0);
+}
+
+async function paintPage(page, canvas, viewport, entry, current) {
+  // Paint into a detached canvas so the visible page keeps its previous
+  // bitmap for the whole render. Resizing the visible canvas up front cleared
+  // it, which made the delayed high-resolution rerender flash white.
+  const offscreen = document.createElement('canvas');
+  offscreen.width = Math.max(1, Math.floor(viewport.width));
+  offscreen.height = Math.max(1, Math.floor(viewport.height));
+  try {
+    const context = offscreen.getContext('2d', { alpha: false });
+    if (!context) throw new Error('Canvas is unavailable');
+    context.fillStyle = '#ffffff';
+    context.fillRect(0, 0, offscreen.width, offscreen.height);
+    const task = page.render({ canvasContext: context, canvas: offscreen, viewport });
+    entry.renderTask = task;
+    try {
+      await task.promise;
+    } finally {
+      entry.renderTask = null;
+    }
+    // A cancelled render can still settle after the cancel. Never blit a
+    // stale scale over the newest bitmap.
+    if (!current()) return false;
+    // Resize and blit in the same task so the old bitmap is replaced without
+    // an intermediate white frame.
+    swapPageCanvas(canvas, offscreen);
+    return true;
+  } finally {
+    // Release the canvas on failure too, not only after a successful blit.
+    offscreen.width = 1;
+    offscreen.height = 1;
+  }
+}
+
 async function doRenderPage(s, idx) {
   const entry = s.pageEls.get(idx);
   if (!entry || !s.pdf || s !== state) return;
 
-  const page = await s.pdf.getPage(idx + 1);
+  let page;
+  try {
+    page = await s.pdf.getPage(idx + 1);
+  } catch (error) {
+    if (s === state) {
+      entry.rendered = 'error';
+      showPageError(entry, idx + 1, error);
+    }
+    return;
+  }
   const rotation = (((page.rotate + (s.rotations[idx] || 0)) % 360) + 360) % 360;
-  const vp = page.getViewport({ scale: s.scale, rotation });
+  const native = page.getViewport({ scale: 1, rotation });
+  const widthScale = s.pageWidth ? s.pageWidth / Math.max(1, native.width) : 1;
+  const effectiveScale = s.scale * widthScale;
+  const vp = page.getViewport({ scale: effectiveScale, rotation });
   const key = `${s.scale}|${rotation}`;
 
   // A blank `rendered` marks the page stale; the key check skips redundant work.
@@ -740,38 +883,58 @@ async function doRenderPage(s, idx) {
   const seq = entry.renderSeq;
 
   const canvas = entry.div.querySelector('.page-canvas');
-  const scaled = page.getViewport({ scale: s.scale * DPR, rotation });
+  const scaled = page.getViewport({ scale: effectiveScale * DPR, rotation });
   const pixelBudget = Math.min(1, Math.sqrt(MAX_CANVAS_PIXELS / Math.max(1, scaled.width * scaled.height)));
-  const renderViewport = pixelBudget < 1
-    ? page.getViewport({ scale: s.scale * DPR * pixelBudget, rotation })
-    : scaled;
-  canvas.width = Math.max(1, Math.floor(renderViewport.width));
-  canvas.height = Math.max(1, Math.floor(renderViewport.height));
+  const sideBudget = Math.min(1, MAX_CANVAS_SIDE / Math.max(1, scaled.width, scaled.height));
+  const budget = Math.min(pixelBudget, sideBudget);
 
-  const ctx = canvas.getContext('2d', { alpha: false });
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  // A large or very complex page can fail at full resolution. Try progressively
+  // smaller backing stores while keeping the same CSS page size, so the page
+  // remains visible (slightly softer) instead of becoming permanently blank.
+  const current = () => s === state && seq === entry.renderSeq;
+  let failure = null;
+  for (const factor of [1, 0.7, 0.5]) {
+    if (!current()) return;
+    const renderViewport = page.getViewport({
+      scale: effectiveScale * DPR * budget * factor,
+      rotation,
+    });
+    try {
+      // A cancelled render must stop the retry ladder; trying the same stale
+      // scale again at a lower resolution would race the newest render.
+      if (!(await paintPage(page, canvas, renderViewport, entry, current))) return;
+      failure = null;
+      break;
+    } catch (error) {
+      if (!current()) return;
+      failure = error;
+    }
+  }
 
-  try {
-    await page.render({ canvasContext: ctx, canvas, viewport: renderViewport }).promise;
-  } catch {
+  if (failure) {
+    entry.rendered = key;
+    entry.vp = vp;
+    showPageError(entry, idx + 1, failure);
+    setMsgFor(s, `Page ${idx + 1} could not be rendered`);
     return;
   }
-  // A superseded render must not skip the layer build below: the newer call
-  // may have been the one that returned early.
-  if (seq === entry.renderSeq) {
-    entry.div.style.width = `${Math.floor(vp.width)}px`;
-    entry.div.style.height = `${Math.floor(vp.height)}px`;
-    entry.rendered = key;
-  }
-  entry.vp = vp;
 
-  await buildTextLayer(s, idx, page, vp);
+  const baseW = entry.baseW || s.pageWidth || vp.width / s.scale;
+  const baseH = entry.baseH || vp.height / s.scale;
+  entry.baseW = baseW;
+  entry.baseH = baseH;
+  entry.div.style.width = `${Math.max(1, Math.floor(baseW * s.scale))}px`;
+  entry.div.style.height = `${Math.max(1, Math.floor(baseH * s.scale))}px`;
+  entry.rendered = key;
+  entry.vp = vp;
+  clearPageError(entry);
+
+  await buildTextLayer(s, idx, page, vp, seq);
   await buildWidgets(s, idx, page, vp);
   await layoutPage(s, idx);
 }
 
-async function buildTextLayer(s, idx, page, vp) {
+async function buildTextLayer(s, idx, page, vp, seq) {
   const entry = s.pageEls.get(idx);
   if (!entry) return;
 
@@ -781,6 +944,9 @@ async function buildTextLayer(s, idx, page, vp) {
   } catch {
     return;
   }
+  // A zoom or rebuild can land while the text is loading; never write
+  // old-scale spans into a page that is no longer the live one.
+  if (s !== state || seq !== entry.renderSeq || !entry.div.isConnected) return;
 
   s.textItems.set(idx, content.items.filter((i) => i.str && i.str.trim()));
 
@@ -2131,7 +2297,7 @@ function updateCurrentPage(s) {
   }
 }
 
-async function applyScale(s) {
+async function applyScale(s, focal = null) {
   if (!hasDoc(s) || s !== state || !s.pageEls.size) return;
   const oldScale = s.layoutScale || s.scale;
   const nextScale = s.scale;
@@ -2154,13 +2320,33 @@ async function applyScale(s) {
     entry.rendered = '';
     entry.vp = null;
     entry.renderSeq += 1;
+    if (entry.renderTask) {
+      try {
+        entry.renderTask.cancel();
+      } catch {
+        /* render already settled */
+      }
+      entry.renderTask = null;
+    }
+    // Leave `entry.chain` alone: it serialises renders for this page. The
+    // cancel above rejects the in-flight render promptly, and `paintPage`
+    // re-checks `renderSeq` before it blits, so the queued render for this
+    // scale can never overlap or be overwritten by the cancelled one.
     entry.div.style.width = `${width}px`;
     entry.div.style.height = `${height}px`;
     const canvas = entry.div.querySelector('.page-canvas');
     if (canvas) {
-      canvas.width = 1;
-      canvas.height = 1;
+      // Keep a visible page's old bitmap while the replacement render is in
+      // flight; stretching it briefly is much better than flashing a black or
+      // white page. Offscreen pages release theirs so zooming a long book does
+      // not accumulate full-resolution canvases.
+      if (!isVisible(entry.div)) {
+        if (canvas.width > 1) blankCanvas(canvas);
+      } else if (canvas.width <= 1) {
+        blankCanvas(canvas);
+      }
     }
+    clearPageError(entry);
     const textLayer = entry.div.querySelector('.text-layer');
     if (textLayer) textLayer.innerHTML = '';
     const searchLayer = entry.div.querySelector('.search-layer');
@@ -2170,44 +2356,295 @@ async function applyScale(s) {
   s.layoutScale = nextScale;
   await new Promise((resolve) => requestAnimationFrame(resolve));
   if (s !== state) return;
-  if (anchorEl) {
+  if (!scrollFocalIntoView(focal) && anchorEl) {
+    // Without a page under the fingers, retain the previous page-top anchor.
     el.viewer.scrollTop = Math.max(0, anchorEl.offsetTop + anchorOffset * (nextScale / oldScale));
   }
-  for (const idx of s.pageOrder) {
-    const entry = s.pageEls.get(idx);
-    if (entry && isVisible(entry.div)) renderPage(s, idx).catch(() => {});
-  }
+
+  // Keep the old bitmap while the user is still zooming. Rerendering every
+  // wheel step at 8 MP is what made high zoom feel slow; the page boxes resize
+  // immediately and the visible pages are refreshed once zooming settles.
+  window.clearTimeout(scaleRenderTimer);
+  scaleRenderTimer = window.setTimeout(() => {
+    scaleRenderTimer = null;
+    if (s !== state || s.closed) return;
+    for (const idx of s.pageOrder) {
+      const entry = s.pageEls.get(idx);
+      if (entry && isVisible(entry.div)) renderPage(s, idx).catch(() => {});
+    }
+    updateCurrentPage(s);
+  }, 160);
+
   updateCurrentPage(s);
 }
 
-async function setScale(s, next) {
+async function setScale(s, next, focal = null) {
+  cancelWheelZoom();
   if (!hasDoc(s) || s !== state) return;
   const target = clamp(next, MIN_SCALE, MAX_SCALE);
   if (Math.abs(target - s.scale) < 0.0001) return;
   s.scale = target;
   syncChrome(s);
-  await applyScale(s);
+  await applyScale(s, focal);
 }
 
-function scheduleScale(s, next) {
-  if (!hasDoc(s) || s !== state) return;
-  const target = clamp(next, MIN_SCALE, MAX_SCALE);
-  if (Math.abs(target - s.scale) < 0.0001) return;
-  s.scale = target;
-  syncChrome(s);
-  window.clearTimeout(scaleTimer);
-  scaleTimer = window.setTimeout(() => {
-    scaleTimer = null;
-    if (s === state) applyScale(s).catch(() => {});
-  }, 50);
+function commitZoomInput() {
+  const s = state;
+  if (!hasDoc(s)) {
+    setZoomLabel(1);
+    return;
+  }
+  const raw = el['zoom-label'].value.trim().replace(/%$/, '').replace(',', '.');
+  const pct = Number.parseFloat(raw);
+  if (!Number.isFinite(pct) || pct <= 0) {
+    setZoomLabel(wheelZoom && wheelZoom.s === s ? wheelZoom.target : s.scale);
+    return;
+  }
+  const target = clamp(pct / 100, MIN_SCALE, MAX_SCALE);
+  setZoomLabel(target);
+  setScale(s, target).catch(() => {});
 }
 
+function resetZoomPreview() {
+  el.pages.style.transform = '';
+  el.pages.style.transformOrigin = '';
+  el.pages.classList.remove('is-pinching');
+}
+
+function cancelWheelZoom() {
+  if (!wheelZoom) return false;
+  const current = wheelZoom;
+  wheelZoom = null;
+  window.clearTimeout(current.timer);
+  if (current.frame) window.cancelAnimationFrame(current.frame);
+  resetZoomPreview();
+  setZoomLabel(current.s.scale);
+  return true;
+}
+
+function commitWheelZoom() {
+  if (!wheelZoom) return;
+  const current = wheelZoom;
+  wheelZoom = null;
+  window.clearTimeout(current.timer);
+  if (current.frame) window.cancelAnimationFrame(current.frame);
+  resetZoomPreview();
+
+  const s = current.s;
+  if (s !== state || !hasDoc(s)) return;
+  const target = clamp(current.target, MIN_SCALE, MAX_SCALE);
+  if (Math.abs(target - s.scale) < 0.0001) {
+    setZoomLabel(s.scale);
+    return;
+  }
+  const focal = current.focal ? { ...current.focal, x: current.x, y: current.y } : null;
+  setScale(s, target, focal).catch(() => {});
+}
+
+// Touchpad and Ctrl/Cmd-wheel zoom previews with a compositor transform, like
+// the touch pinch. Resizing every page box on each wheel tick made trackpad
+// zooming choppy, so the real layout change waits until the wheel goes idle.
 function onZoomWheel(ev) {
-  if (!hasDoc(state) || !(ev.ctrlKey || ev.metaKey)) return;
+  if (!hasDoc(state) || !(ev.ctrlKey || ev.metaKey) || pinch) return;
   const delta = Math.abs(ev.deltaY) >= Math.abs(ev.deltaX) ? ev.deltaY : ev.deltaX;
   if (!delta) return;
   ev.preventDefault();
-  scheduleScale(state, state.scale * Math.exp(-delta * 0.0015));
+
+  const s = state;
+  if (!wheelZoom || wheelZoom.s !== s) {
+    cancelWheelZoom();
+    const pagesBox = el.pages.getBoundingClientRect();
+    wheelZoom = {
+      s,
+      startScale: s.scale,
+      target: s.scale,
+      focal: pageFocalAt(ev.clientX, ev.clientY),
+      x: ev.clientX,
+      y: ev.clientY,
+      timer: 0,
+      frame: 0,
+    };
+    el.pages.style.transformOrigin = `${ev.clientX - pagesBox.left}px ${ev.clientY - pagesBox.top}px`;
+    el.pages.style.transform = 'scale(1)';
+    el.pages.classList.add('is-pinching');
+  }
+
+  const current = wheelZoom;
+  current.target = clamp(
+    current.target * Math.exp(-delta * 0.0015),
+    MIN_SCALE,
+    MAX_SCALE
+  );
+  current.x = ev.clientX;
+  current.y = ev.clientY;
+
+  if (!current.frame) {
+    current.frame = window.requestAnimationFrame(() => {
+      if (!wheelZoom) return;
+      wheelZoom.frame = 0;
+      el.pages.style.transform = `scale(${wheelZoom.target / wheelZoom.startScale})`;
+      setZoomLabel(wheelZoom.target);
+    });
+  }
+
+  window.clearTimeout(current.timer);
+  current.timer = window.setTimeout(commitWheelZoom, 140);
+}
+
+function touchMetrics(touches) {
+  const first = touches[0];
+  const second = touches[1];
+  const dx = second.clientX - first.clientX;
+  const dy = second.clientY - first.clientY;
+  return {
+    distance: Math.hypot(dx, dy),
+    x: (first.clientX + second.clientX) / 2,
+    y: (first.clientY + second.clientY) / 2,
+  };
+}
+
+function findTouch(touches, identifier) {
+  for (const item of touches) {
+    if (item.identifier === identifier) return item;
+  }
+  return null;
+}
+
+function scrollFocalIntoView(focal) {
+  if (!focal || !focal.element || !focal.element.isConnected) return false;
+  const box = focal.element.getBoundingClientRect();
+  if (box.width < 1 || box.height < 1) return false;
+  const targetX = box.left + focal.fx * box.width;
+  const targetY = box.top + focal.fy * box.height;
+  el.viewer.scrollLeft += targetX - focal.x;
+  el.viewer.scrollTop += targetY - focal.y;
+  return true;
+}
+
+function pageFocalAt(x, y) {
+  const node = document.elementFromPoint(x, y);
+  const page = node && node.closest ? node.closest('.page') : null;
+  if (!page || !el.pages.contains(page)) return null;
+  const box = page.getBoundingClientRect();
+  if (box.width < 1 || box.height < 1) return null;
+  return {
+    element: page,
+    fx: clamp((x - box.left) / box.width, 0, 1),
+    fy: clamp((y - box.top) / box.height, 0, 1),
+  };
+}
+
+function startPinch(ev) {
+  if (pinch || ev.touches.length !== 2) return;
+  const s = state;
+  if (!hasDoc(s) || !s.pageEls.size || s.signMode || s.signPlacement) return;
+  const metrics = touchMetrics(ev.touches);
+  if (metrics.distance < 12) return;
+  cancelWheelZoom();
+
+  const pagesBox = el.pages.getBoundingClientRect();
+  pinch = {
+    s,
+    touchA: ev.touches[0].identifier,
+    touchB: ev.touches[1].identifier,
+    startScale: s.scale,
+    target: s.scale,
+    startDistance: metrics.distance,
+    startX: metrics.x,
+    startY: metrics.y,
+    x: metrics.x,
+    y: metrics.y,
+    focal: pageFocalAt(metrics.x, metrics.y),
+  };
+
+  // The transform previews the zoom at 60fps. The page canvases are untouched
+  // until the gesture ends, when setScale performs the single real resize.
+  el.pages.style.transformOrigin = `${metrics.x - pagesBox.left}px ${metrics.y - pagesBox.top}px`;
+  el.pages.style.transform = 'scale(1)';
+  el.pages.classList.add('is-pinching');
+  setZoomLabel(s.scale);
+
+  // A second finger must not leave a half-finished annotation behind.
+  if (s.drag) {
+    s.drag = null;
+    for (const idx of s.pageOrder) paintAnnotations(s, idx);
+  }
+  ev.preventDefault();
+}
+
+function movePinch(ev) {
+  if (!pinch) return;
+  const first = findTouch(ev.touches, pinch.touchA);
+  const second = findTouch(ev.touches, pinch.touchB);
+  if (!first || !second) {
+    finishPinch(ev);
+    return;
+  }
+  const metrics = touchMetrics([first, second]);
+  if (metrics.distance < 1) return;
+  ev.preventDefault();
+
+  const target = clamp(
+    pinch.startScale * (metrics.distance / pinch.startDistance),
+    MIN_SCALE,
+    MAX_SCALE
+  );
+  const factor = target / pinch.startScale;
+  const dx = metrics.x - pinch.startX;
+  const dy = metrics.y - pinch.startY;
+  pinch.target = target;
+  pinch.x = metrics.x;
+  pinch.y = metrics.y;
+  el.pages.style.transform = `translate3d(${dx}px, ${dy}px, 0) scale(${factor})`;
+  setZoomLabel(target);
+}
+
+function finishPinch(ev, cancelled = false) {
+  if (!pinch) return;
+  const current = pinch;
+  pinch = null;
+  el.pages.style.transform = '';
+  el.pages.style.transformOrigin = '';
+  el.pages.classList.remove('is-pinching');
+  if (ev && ev.cancelable) ev.preventDefault();
+
+  const s = current.s;
+  if (s !== state || !hasDoc(s)) return;
+  if (cancelled) {
+    setZoomLabel(s.scale);
+    return;
+  }
+
+  const target = clamp(current.target, MIN_SCALE, MAX_SCALE);
+  const focal = current.focal
+    ? { ...current.focal, x: current.x, y: current.y }
+    : null;
+  if (Math.abs(target - s.scale) < 0.0001) {
+    // Fingers may have translated without changing the distance. Keep the PDF
+    // point under them instead of snapping the content back.
+    scrollFocalIntoView(focal);
+    updateCurrentPage(s);
+    setZoomLabel(s.scale);
+    return;
+  }
+  setScale(s, target, focal).catch(() => {});
+}
+
+function onTouchStart(ev) {
+  if (ev.touches.length === 2) startPinch(ev);
+}
+
+function onTouchMove(ev) {
+  if (!pinch) return;
+  movePinch(ev);
+}
+
+function onTouchEnd(ev) {
+  if (pinch && ev.touches.length < 2) finishPinch(ev);
+}
+
+function onTouchCancel(ev) {
+  if (pinch) finishPinch(ev, true);
 }
 
 function isVisible(node) {
@@ -2219,16 +2656,17 @@ function isVisible(node) {
 async function fitWidth(s) {
   if (!hasDoc(s) || s !== state) return;
   const vp = await getViewport(s, s.pageOrder[s.current], 1);
-  const available = el.viewer.clientWidth - 56;
-  await setScale(s, available / Math.max(vp.width, 1));
+  await setScale(s, availablePageWidth() / Math.max(vp.width, 1));
 }
 
 async function fitPage(s) {
   if (!hasDoc(s) || s !== state) return;
   const vp = await getViewport(s, s.pageOrder[s.current], 1);
-  const availableW = Math.max(120, el.viewer.clientWidth - 56);
-  const availableH = Math.max(120, el.viewer.clientHeight - 40);
-  await setScale(s, Math.min(availableW / Math.max(vp.width, 1), availableH / Math.max(vp.height, 1)));
+  const availableH = Math.max(0, el.viewer.clientHeight - 40);
+  await setScale(
+    s,
+    Math.min(availablePageWidth() / Math.max(vp.width, 1), availableH / Math.max(vp.height, 1))
+  );
 }
 
 async function actualSize(s) {
@@ -2260,10 +2698,10 @@ async function rotateCurrent(s) {
   const vp = await getViewport(s, idx);
   if (s !== state) return;
   if (entry) {
-    entry.baseW = vp.width / s.scale;
+    entry.baseW = s.pageWidth || vp.width / s.scale;
     entry.baseH = vp.height / s.scale;
-    entry.div.style.width = `${Math.floor(vp.width)}px`;
-    entry.div.style.height = `${Math.floor(vp.height)}px`;
+    entry.div.style.width = `${Math.max(1, Math.floor(entry.baseW * s.scale))}px`;
+    entry.div.style.height = `${Math.max(1, Math.floor(entry.baseH * s.scale))}px`;
     entry.vp = vp;
     await renderPage(s, idx);
   }
@@ -2795,6 +3233,20 @@ function bind() {
   el['btn-actual'].addEventListener('click', () => {
     if (state) actualSize(state);
   });
+  el['zoom-label'].addEventListener('focus', () => el['zoom-label'].select());
+  el['zoom-label'].addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      ev.stopPropagation();
+      el['zoom-label'].blur();
+    } else if (ev.key === 'Escape') {
+      ev.preventDefault();
+      ev.stopPropagation();
+      setZoomLabel(state && hasDoc(state) ? state.scale : 1);
+      el['zoom-label'].blur();
+    }
+  });
+  el['zoom-label'].addEventListener('blur', commitZoomInput);
   el['btn-find-prev'].addEventListener('click', () => stepFind(-1));
   el['btn-find-next'].addEventListener('click', () => stepFind(1));
 
@@ -2828,6 +3280,10 @@ function bind() {
     scrollTimer = window.setTimeout(() => updateCurrentPage(state), 90);
   });
   el.viewer.addEventListener('wheel', onZoomWheel, { passive: false });
+  el.viewer.addEventListener('touchstart', onTouchStart, { passive: false, capture: true });
+  el.viewer.addEventListener('touchmove', onTouchMove, { passive: false });
+  el.viewer.addEventListener('touchend', onTouchEnd, { passive: false });
+  el.viewer.addEventListener('touchcancel', onTouchCancel, { passive: false });
 
   document.addEventListener('keydown', (ev) => {
     if (ev.ctrlKey && !ev.altKey && ev.key.toLowerCase() === 's') {
@@ -2983,12 +3439,151 @@ async function showCert() {
   await openDialog(el['dlg-cert']);
 }
 
-/* Smoke test hook used by `npm run smoke`. */
-window.__smoke = async (base64) => {
+/* Focused layout regression: a first page's size must not change the width
+   at which it opens, and rebuilding bytes after signing must not refit. */
+async function smokeLayoutCheck(baseBytes, variantBytes) {
+  const openLayoutDoc = async (bytes, name) => {
+    const tab = newTab();
+    // Measure before the new pages add a scrollbar; openBytes uses this width.
+    const available = availablePageWidth();
+    await openBytes(tab, bytes, name, null);
+    const entry = tab.pageEls.get(tab.pageOrder[0]);
+    const widths = tab.pageOrder.map((idx) => {
+      const pageEntry = tab.pageEls.get(idx);
+      return pageEntry ? pageEntry.div.getBoundingClientRect().width : 0;
+    });
+    return {
+      tab,
+      entry,
+      widths,
+      allFit: widths.length > 0 && widths.every((w) => Math.abs(w - available) <= 1),
+      width: entry ? entry.div.getBoundingClientRect().width : 0,
+      scale: tab.scale,
+      available,
+    };
+  };
+
+  const base = await openLayoutDoc(baseBytes, 'layout-base.pdf');
+  const variant = await openLayoutDoc(variantBytes, 'layout-variant.pdf');
+  const fitCheck =
+    base.width > 0 &&
+    variant.width > 0 &&
+    base.allFit &&
+    variant.allFit &&
+    Math.abs(base.width - base.available) <= 1 &&
+    Math.abs(variant.width - variant.available) <= 1 &&
+    Math.abs(base.width - variant.width) <= 1 &&
+    Math.abs(base.scale - variant.scale) > 0.1;
+
+  const targetScale = clamp(variant.scale * 0.8, MIN_SCALE, MAX_SCALE);
+  await setScale(variant.tab, targetScale);
+  const beforeScale = variant.tab.scale;
+  const beforeLayoutScale = variant.tab.layoutScale;
+  const beforeWidth = variant.entry.div.getBoundingClientRect().width;
+
+  let rebuildError = '';
+  let signed = null;
   try {
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    signed = await window.omnipdf.sign({
+      bytes: variant.tab.bytes,
+      pageIndex: 0,
+      rect: { x: 32, y: 32, w: 160, h: 52 },
+      name: 'Layout Regression',
+      reason: 'Keep the current zoom after a rebuild',
+      location: '',
+      formValues: {},
+      annotations: [],
+      pageOps: { rotations: {} },
+    });
+  } catch (err) {
+    rebuildError = String((err && err.message) || err);
+  }
+  if (signed) {
+    await openBytes(variant.tab, signed.bytes, variant.tab.fileName, variant.tab.filePath, {
+      history: 'none',
+      dirty: false,
+    });
+  }
+
+  const rebuiltEntry = variant.tab.pageEls.get(variant.tab.pageOrder[0]);
+  const afterScale = variant.tab.scale;
+  const afterLayoutScale = variant.tab.layoutScale;
+  const afterWidth = rebuiltEntry ? rebuiltEntry.div.getBoundingClientRect().width : 0;
+  const rebuildCheck =
+    !rebuildError &&
+    Boolean(rebuiltEntry) &&
+    Math.abs(afterScale - beforeScale) < 0.0001 &&
+    Math.abs(afterLayoutScale - beforeLayoutScale) < 0.0001 &&
+    Math.abs(afterWidth - beforeWidth) <= 1 &&
+    Math.abs(afterWidth - variant.width) > 2;
+
+  // Typing a percentage into the zoom readout must apply that exact zoom.
+  el['zoom-label'].value = '150%';
+  el['zoom-label'].dispatchEvent(new Event('blur'));
+  let zoomInputWidth = 0;
+  for (let i = 0; i < 40; i += 1) {
+    if (Math.abs(variant.tab.layoutScale - 1.5) < 0.0001) break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  zoomInputWidth = rebuiltEntry ? rebuiltEntry.div.getBoundingClientRect().width : 0;
+  // Read before the tabs close and the shared label switches to another tab.
+  const zoomInputLabel = el['zoom-label'].value;
+  const zoomInputCheck =
+    Math.abs(variant.tab.scale - 1.5) < 0.0001 &&
+    Math.abs(variant.tab.layoutScale - 1.5) < 0.0001 &&
+    zoomInputLabel === '150%' &&
+    Math.abs(zoomInputWidth - Math.floor(variant.tab.pageWidth * 1.5)) <= 1;
+
+  variant.tab.dirty = false;
+  base.tab.dirty = false;
+  await closeTab(variant.tab);
+  await closeTab(base.tab);
+
+  return {
+    ok: fitCheck && rebuildCheck && zoomInputCheck,
+    zoomInput: {
+      scale: variant.tab.scale,
+      layoutScale: variant.tab.layoutScale,
+      label: zoomInputLabel,
+      width: zoomInputWidth,
+      check: zoomInputCheck,
+    },
+    fit: {
+      baseWidth: base.width,
+      variantWidth: variant.width,
+      baseWidths: base.widths,
+      variantWidths: variant.widths,
+      baseScale: base.scale,
+      variantScale: variant.scale,
+      baseAvailable: base.available,
+      variantAvailable: variant.available,
+      fitCheck,
+    },
+    rebuild: {
+      beforeScale,
+      afterScale,
+      beforeLayoutScale,
+      afterLayoutScale,
+      beforeWidth,
+      afterWidth,
+      fitWidth: variant.width,
+      error: rebuildError,
+      rebuildCheck,
+    },
+  };
+}
+
+/* Smoke test hook used by `npm run smoke`. */
+window.__smoke = async (base64, variantBase64) => {
+  try {
+    const decode = (value) => {
+      const binary = atob(value);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    };
+    const bytes = decode(base64);
+    const variantBytes = decode(variantBase64 || base64);
 
     const first = newTab();
     await openBytes(first, bytes, 'fixture.pdf', null);
@@ -3032,6 +3627,235 @@ window.__smoke = async (base64) => {
       printImageWidth > 0 &&
       recentRendered;
 
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const sampleCanvasInk = (canvas) => {
+      if (!canvas || canvas.width < 2 || canvas.height < 2) return { ink: 0, mean: 0 };
+      try {
+        const sample = document.createElement('canvas');
+        sample.width = 80;
+        sample.height = 80;
+        const ctx = sample.getContext('2d', { alpha: false });
+        if (!ctx) return { ink: 0, mean: 0 };
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, 80, 80);
+        ctx.drawImage(canvas, 0, 0, 80, 80);
+        const pixels = ctx.getImageData(0, 0, 80, 80).data;
+        let ink = 0;
+        let sum = 0;
+        for (let i = 0; i < pixels.length; i += 4) {
+          const lum = (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3;
+          sum += lum;
+          if (lum < 250) ink += 1;
+        }
+        return { ink, mean: sum / (80 * 80) };
+      } catch {
+        return { ink: 0, mean: 0 };
+      }
+    };
+
+    // Synthetic two-finger gestures: verifies the live transform preview, then
+    // a second pinch committed while the first commit's rerender is still in
+    // flight. That older render must be cancelled instead of blitting over the
+    // newest scale, and only the final scale may publish a rendered key.
+    // The find check above leaves the viewer on a later page; return to the
+    // first page so the pinch and its canvas check target the visible page.
+    scrollToPage(first, 0);
+    await wait(100);
+    const viewerBox = el.viewer.getBoundingClientRect();
+    const pageBox = entry.div.getBoundingClientRect();
+    const pinchX = pageBox.left + pageBox.width / 2;
+    const pinchY = Math.min(
+      Math.max(pageBox.top + 150, viewerBox.top + 80),
+      viewerBox.bottom - 80
+    );
+    const touchAt = (id, x, y) =>
+      new Touch({
+        identifier: id,
+        target: entry.div,
+        clientX: x,
+        clientY: y,
+        pageX: x,
+        pageY: y,
+        screenX: x,
+        screenY: y,
+        radiusX: 2,
+        radiusY: 2,
+        force: 1,
+      });
+    const touchEvent = (type, touches, changed = touches) =>
+      new TouchEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        touches,
+        targetTouches: touches,
+        changedTouches: changed,
+      });
+    const beforePinchScale = first.layoutScale;
+    const beforePinchWidth = pageBox.width;
+    // Wheel zoom now previews with a transform and only commits after the
+    // wheel goes idle. Page boxes must not resize during the gesture, and a
+    // pinch starting here must cancel the preview and use the laid-out scale.
+    el.viewer.dispatchEvent(
+      new WheelEvent('wheel', { deltaY: -120, ctrlKey: true, bubbles: true, cancelable: true })
+    );
+    const wheelPreviewTransform = el.pages.style.transform;
+    const wheelPreviewScale = wheelZoom ? wheelZoom.target : 0;
+    const wheelPreviewLayoutScale = first.scale;
+    const wheelPreviewWidth = entry.div.getBoundingClientRect().width;
+    const pinchA = touchAt(1, pinchX - 60, pinchY);
+    const pinchB = touchAt(2, pinchX + 60, pinchY);
+    el.viewer.dispatchEvent(touchEvent('touchstart', [pinchA, pinchB]));
+    const pinchStartScale = first.scale;
+    const pinchStartWidth = entry.div.getBoundingClientRect().width;
+    const wheelCancelCheck =
+      wheelPreviewTransform.includes('scale(') &&
+      wheelPreviewScale > beforePinchScale * 1.05 &&
+      Math.abs(wheelPreviewLayoutScale - beforePinchScale) < 0.0001 &&
+      Math.abs(wheelPreviewWidth - beforePinchWidth) < 1 &&
+      Math.abs(pinchStartScale - beforePinchScale) < 0.0001 &&
+      Math.abs(pinchStartWidth - beforePinchWidth) < 1 &&
+      wheelZoom === null;
+    const pinchMoveA = touchAt(1, pinchX - 140, pinchY);
+    const pinchMoveB = touchAt(2, pinchX + 140, pinchY);
+    el.viewer.dispatchEvent(touchEvent('touchmove', [pinchMoveA, pinchMoveB]));
+    const pinchPreviewTransform = el.pages.style.transform;
+    const pinchPreviewLabel = el['zoom-label'].value;
+    el.viewer.dispatchEvent(touchEvent('touchend', [], [pinchMoveA, pinchMoveB]));
+    const firstPinchScale = first.scale;
+    const firstPinchWidth = entry.div.getBoundingClientRect().width;
+
+    // The commit resizes the page boxes at once and queues its rerender 160ms
+    // later. Catch that rerender while it is still in flight, then commit a
+    // second pinch on top of it: applyScale must cancel the older render, so a
+    // stale scale can never become the rendered key that the checks below see.
+    let firstRenderInFlight = false;
+    for (let i = 0; i < 400; i += 1) {
+      if (entry.renderTask) {
+        firstRenderInFlight = true;
+        break;
+      }
+      await wait(5);
+    }
+    const renderSeqBeforeSecond = entry.renderSeq;
+    const secondX = viewerBox.left + viewerBox.width / 2;
+    const secondY = Math.min(
+      Math.max(viewerBox.top + viewerBox.height / 2, viewerBox.top + 80),
+      viewerBox.bottom - 80
+    );
+    const secondStartA = touchAt(1, secondX - 100, secondY);
+    const secondStartB = touchAt(2, secondX + 100, secondY);
+    el.viewer.dispatchEvent(touchEvent('touchstart', [secondStartA, secondStartB]));
+    const secondMoveA = touchAt(1, secondX - 50, secondY);
+    const secondMoveB = touchAt(2, secondX + 50, secondY);
+    el.viewer.dispatchEvent(touchEvent('touchmove', [secondMoveA, secondMoveB]));
+    const secondPreviewLabel = el['zoom-label'].value;
+    // Read this before touchend: committing the second pinch cancels it.
+    const secondPinchCancelledRender = Boolean(entry.renderTask);
+    el.viewer.dispatchEvent(touchEvent('touchend', [], [secondMoveA, secondMoveB]));
+    const finalPinchScale = first.scale;
+    const finalPinchWidth = entry.div.getBoundingClientRect().width;
+    const pinchRotation = (((page0.rotate + (first.rotations[idx] || 0)) % 360) + 360) % 360;
+    const expectedPinchRenderKey = `${finalPinchScale}|${pinchRotation}`;
+    // Only the final scale is awaited. The cancelled intermediate render would
+    // publish its own key, which must never satisfy this check.
+    for (let i = 0; i < 100 && entry.rendered !== expectedPinchRenderKey; i += 1) await wait(100);
+    const renderSeqAfterFinal = entry.renderSeq;
+    const pinchCanvas = entry.div.querySelector('.page-canvas');
+    const pinchInk = sampleCanvasInk(pinchCanvas);
+    const pinchViewerBox = el.viewer.getBoundingClientRect();
+    const pinchBox = entry.div.getBoundingClientRect();
+    const pinchVisible =
+      pinchBox.bottom > pinchViewerBox.top && pinchBox.top < pinchViewerBox.bottom;
+    const pinchError = entry.div.querySelector('.page-error');
+    const pinchErrorVisible = Boolean(pinchError && !pinchError.hidden);
+    const pinchCheck =
+      pinchPreviewTransform.includes('scale(') &&
+      pinchPreviewLabel !== `${Math.round(beforePinchScale * 100)}%` &&
+      secondPinchCancelledRender &&
+      renderSeqAfterFinal > renderSeqBeforeSecond &&
+      Math.abs(finalPinchScale - firstPinchScale) > 0.01 &&
+      el.pages.style.transform === '' &&
+      entry.rendered === expectedPinchRenderKey &&
+      Boolean(entry.vp) &&
+      Math.abs(entry.vp.scale - finalPinchScale) < 0.0001 &&
+      Boolean(pinchCanvas) &&
+      pinchCanvas.width > 1 &&
+      pinchCanvas.height > 1 &&
+      pinchInk.ink > 20 &&
+      pinchInk.mean > 200 &&
+      pinchVisible &&
+      !pinchErrorVisible &&
+      wheelCancelCheck;
+
+    // Text-layer regression: hold page 0's text request open across a page
+    // rebuild. It must resolve after the rebuilt page has rendered its own
+    // layer, and the stale items must never reach that layer or the cache.
+    const realGetTextContent = page0.getTextContent.bind(page0);
+    let releaseStaleText;
+    const staleTextGate = new Promise((resolve) => {
+      releaseStaleText = resolve;
+    });
+    let textRequests = 0;
+    page0.getTextContent = async () => {
+      textRequests += 1;
+      if (textRequests === 1) {
+        await staleTextGate;
+        return {
+          items: [
+            {
+              str: 'STALE TEXT LAYER',
+              transform: [1, 0, 0, 1, 8, 18],
+              width: 60,
+              height: 10,
+              dir: 'ltr',
+              fontName: 'g_d0_f1',
+            },
+          ],
+        };
+      }
+      return realGetTextContent();
+    };
+    const staleTextEntry = first.pageEls.get(idx);
+    staleTextEntry.rendered = '';
+    const staleTextRender = renderPage(first, idx);
+    for (let i = 0; i < 400 && textRequests === 0; i += 1) await wait(10);
+    const textRequestPending = textRequests > 0;
+    await buildPages(first);
+    const liveTextEntry = first.pageEls.get(idx);
+    await renderPage(first, idx);
+    for (
+      let i = 0;
+      i < 100 &&
+      (!first.textItems.has(idx) ||
+        !liveTextEntry.div.querySelector('.text-layer').children.length);
+      i += 1
+    ) {
+      await wait(50);
+    }
+    const liveTextLayer = liveTextEntry.div.querySelector('.text-layer');
+    const liveTextHtml = liveTextLayer.innerHTML;
+    const liveTextItems = first.textItems.get(idx);
+    releaseStaleText();
+    await staleTextRender;
+    await wait(100);
+    page0.getTextContent = realGetTextContent;
+    const liveTextLayerIntact = liveTextLayer.innerHTML === liveTextHtml;
+    const liveTextCacheIntact = first.textItems.get(idx) === liveTextItems;
+    const liveTextLeak =
+      liveTextLayer.textContent.includes('STALE TEXT LAYER') ||
+      (liveTextItems || []).some((item) => String(item.str).includes('STALE'));
+    const staleTextLayerLeak = staleTextEntry.div.textContent.includes('STALE TEXT LAYER');
+    const textLayerCheck =
+      textRequestPending &&
+      Boolean(liveTextItems) &&
+      liveTextItems.length > 0 &&
+      !staleTextEntry.div.isConnected &&
+      liveTextLayerIntact &&
+      liveTextCacheIntact &&
+      !liveTextLeak &&
+      !staleTextLayerLeak;
+
     // A second document must not disturb the first, and switching back has to
     // rebuild the first tab's pages from that tab's own state.
     const second = newTab();
@@ -3039,7 +3863,6 @@ window.__smoke = async (base64) => {
     const twoTabsOpen = tabs.length;
     const secondLabel = second.ui ? second.ui.label.textContent : '';
 
-    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const press = (key, shift) =>
       document.dispatchEvent(
         new KeyboardEvent('keydown', {
@@ -3076,9 +3899,18 @@ window.__smoke = async (base64) => {
       tabsAfterClose === 1 &&
       stillFirst;
 
+    const layout = await smokeLayoutCheck(bytes, variantBytes);
+
     return {
       build: BUILD_TAG,
-      ok: items.length > 0 && tabCheck && featuresCheck,
+      ok:
+        items.length > 0 &&
+        tabCheck &&
+        featuresCheck &&
+        pinchCheck &&
+        textLayerCheck &&
+        layout.ok,
+      layout,
       pages: first.pdf.numPages,
       textItems: items.length,
       sample: items.map((i) => i.str).join(' ').slice(0, 100),
@@ -3098,6 +3930,46 @@ window.__smoke = async (base64) => {
         printImageWidth,
         recentRendered,
         featuresCheck,
+        pinchCheck,
+      },
+      pinch: {
+        beforeScale: beforePinchScale,
+        firstScale: firstPinchScale,
+        finalScale: finalPinchScale,
+        beforeWidth: beforePinchWidth,
+        firstWidth: firstPinchWidth,
+        finalWidth: finalPinchWidth,
+        previewTransform: pinchPreviewTransform,
+        previewLabel: pinchPreviewLabel,
+        secondPreviewLabel,
+        wheelPreviewScale,
+        pinchStartScale,
+        wheelCancelCheck,
+        firstRenderInFlight,
+        secondPinchCancelledRender,
+        renderSeqBeforeSecond,
+        renderSeqAfterFinal,
+        renderedKey: entry.rendered,
+        expectedRenderedKey: expectedPinchRenderKey,
+        renderedVpScale: entry.vp ? entry.vp.scale : 0,
+        renderedKeyMatches: entry.rendered === expectedPinchRenderKey,
+        canvasWidth: pinchCanvas ? pinchCanvas.width : 0,
+        canvasHeight: pinchCanvas ? pinchCanvas.height : 0,
+        canvasInk: pinchInk.ink,
+        canvasMean: pinchInk.mean,
+        canvasVisible: pinchVisible,
+        pageErrorVisible: pinchErrorVisible,
+        pinchCheck,
+      },
+      textLayer: {
+        staleRequestPending: textRequestPending,
+        staleEntryDetached: !staleTextEntry.div.isConnected,
+        liveItems: liveTextItems ? liveTextItems.length : 0,
+        liveSpans: liveTextLayer.children.length,
+        layerIntact: liveTextLayerIntact,
+        cacheIntact: liveTextCacheIntact,
+        staleLeak: liveTextLeak || staleTextLayerLeak,
+        textLayerCheck,
       },
       tabs: {
         twoTabsOpen,
