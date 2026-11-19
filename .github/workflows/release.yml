@@ -59,10 +59,33 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
+          assets=(
+            "dist/OmniPDF-Setup-${version}.exe"
+            "dist/OmniPDF-Setup-${version}.exe.blockmap"
+            "dist/latest.yml"
+          )
+          # Re-tagging an already-published version must not fail the run, and a
+          # published release's bytes are immutable: fill in missing assets and
+          # never overwrite the verified installer, blockmap or feed.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists; verifying assets."
+            present="$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name')"
+            for asset in "${assets[@]}"; do
+              name="$(basename "$asset")"
+              if grep -Fxq "$name" <<<"$present"; then
+                echo "asset-present $name"
+              else
+                echo "asset-missing $name; uploading"
+                gh release upload "$GITHUB_REF_NAME" "$asset"
+              fi
+            done
+            gh release edit "$GITHUB_REF_NAME" --title "OmniPDF $version"
+            echo "release-ready $GITHUB_REF_NAME (existing)"
+            exit 0
+          fi
           gh release create "$GITHUB_REF_NAME" \
             --title "OmniPDF $version" \
             --generate-notes \
-            "dist/OmniPDF-Setup-${version}.exe" \
-            "dist/OmniPDF-Setup-${version}.exe.blockmap" \
-            "dist/latest.yml"
+            "${assets[@]}"
