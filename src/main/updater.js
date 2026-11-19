@@ -146,8 +146,11 @@ function setup() {
   autoUpdater.on('update-available', (info) => {
     emit({ state: 'downloading', version: info && info.version, percent: 0, interactive: lastInteractive });
   });
-  autoUpdater.on('update-not-available', (info) => {
-    emit({ state: 'none', version: info && info.version, interactive: lastInteractive });
+  autoUpdater.on('update-not-available', () => {
+    // The feed's latest version can be older than the running build (a local
+    // build that has not been published yet, for example). Naming the feed's
+    // version in an "up to date" message reads as if it were the installed one.
+    emit({ state: 'none', version: app.getVersion(), interactive: lastInteractive });
   });
   autoUpdater.on('download-progress', (progress) => {
     emit({
