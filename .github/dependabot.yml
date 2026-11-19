@@ -1,0 +1,9 @@
+version: 2
+updates:
+  # Keeps the pinned action SHAs in .github/workflows/release.yml current.
+  # Dependabot rewrites the hash and the trailing "# vX.Y.Z" comment together,
+  # so each bump shows the old and new version in the diff.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
